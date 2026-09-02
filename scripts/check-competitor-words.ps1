@@ -1,6 +1,8 @@
 ﻿# 竞品词扫描（本地版，与 .github/workflows/ci.yml 的 competitor-words job 逻辑一致）
 # 用法：powershell -ExecutionPolicy Bypass -File scripts/check-competitor-words.ps1
 # 扫描范围排除：词表文件自身、workflow 目录、本脚本自身。
+# 文件清单含未跟踪文件（git ls-files --others）：提交前扫描不得漏掉新文件——
+# CI 扫的是已提交全集，本地只扫已跟踪文件会产生「本地通过、CI 失败」的假阴性。
 $ErrorActionPreference = 'Stop'
 # git 输出统一按 UTF-8 解码，并关闭非 ASCII 路径转义（否则中文文件名变成 \346... 八进制串，
 # Test-Path 直接报错，导致本地扫描硬失败、CI 侧静默跳过中文文件名）。
@@ -22,10 +24,14 @@ try {
         '^\.github/workflows/',
         '^scripts/check-competitor-words\.ps1$'
     )
-    $files = git -c core.quotepath=false ls-files | Where-Object {
-        $f = $_
-        -not ($excludes | Where-Object { $f -match $_ })
-    }
+    $files = (@(git -c core.quotepath=false ls-files) +
+              @(git -c core.quotepath=false ls-files --others --exclude-standard)) |
+        Where-Object { $_ } |
+        Select-Object -Unique |
+        Where-Object {
+            $f = $_
+            -not ($excludes | Where-Object { $f -match $_ })
+        }
     $violations = @()
     foreach ($file in $files) {
         if (Test-Path -LiteralPath $file -PathType Leaf) {

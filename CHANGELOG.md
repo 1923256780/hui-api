@@ -32,6 +32,7 @@
 
 - `.gitignore` 补充 `config.yaml`、`*.db-shm`、`*.db-wal`。
 - 竞品词扫描脚本修复：显式 `git -c core.quotepath=false` 与控制台 UTF-8 编码，消除中文文件名导致的本地崩溃与 CI 静默跳过盲区。
+- 竞品词扫描假阴性修复（M1-wave3 追加）：本地扫描清单并入未跟踪文件（`git ls-files --others --exclude-standard`），消除「提交前本地通过、CI 失败」盲区；黄金自检测试改为从词表文件读取禁用词（测试代码内不再硬编码竞品词，词表成为单一事实源）。
 
 ### 文档
 

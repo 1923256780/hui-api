@@ -119,14 +119,33 @@ func TestGoldenCasesViaLookup(t *testing.T) {
 	}
 }
 
-// TestGoldenFileNoCompetitorWords 黄金用例文件竞品词自检（与 CI 扫描语义一致）。
+// TestGoldenFileNoCompetitorWords 黄金用例文件竞品词自检（与 CI 扫描语义一致：
+// 大小写不敏感、子串匹配）。词表以 .github/competitor-words.txt 为单一事实源，
+// 测试代码内不硬编码禁用词（否则本文件自身会成为扫描命中源）。
 func TestGoldenFileNoCompetitorWords(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "golden", "billing_cases.json"))
 	if err != nil {
 		t.Fatalf("读取黄金用例文件失败: %v", err)
 	}
-	for _, w := range []string{"new-api", "new_api", "newapi", "one-api", "one_api", "oneapi", "litellm"} {
-		if strings.Contains(strings.ToLower(string(raw)), w) {
+	// go test 的 CWD 为包目录（internal/billing），仓库根即 ../..。
+	wordsRaw, err := os.ReadFile(filepath.Join("..", "..", ".github", "competitor-words.txt"))
+	if err != nil {
+		t.Fatalf("读取竞品词表失败（自检必须可执行）: %v", err)
+	}
+	words := []string{}
+	for _, line := range strings.Split(string(wordsRaw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		words = append(words, strings.ToLower(line))
+	}
+	if len(words) == 0 {
+		t.Fatal("竞品词表为空，自检无法执行")
+	}
+	content := strings.ToLower(string(raw))
+	for _, w := range words {
+		if strings.Contains(content, w) {
 			t.Fatalf("黄金用例文件包含禁用词 %q", w)
 		}
 	}
