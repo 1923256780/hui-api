@@ -38,9 +38,10 @@
 
 - [x] M1-wave2：`/v1/chat/completions`、`/v1/models` 契约细化 + 示例（2026-09-02）
 - [x] M1-wave2：`/v1/messages`、`/v1/messages/count_tokens` 契约细化 + 示例（2026-09-02）
+- [x] M1-wave3：计费错误码（403/503）与计费运行轨键补充（2026-09-02）
 - [ ] M3：管理面各端点组契约细化 + 错误码表
 
-## 四、转发面契约（M1-wave2 落地）
+## 四、转发面契约（M1-wave2 落地，M1-wave3 补计费）
 
 ### 4.1 通用约定
 
@@ -49,7 +50,8 @@
 - **流式**：`stream: true` 时以 SSE 逐事件转发（事件边界即 flush，不缓冲整段、不改写事件原文）；OpenAI 面流式请求自动注入 `stream_options.include_usage=true` 以取尾 chunk 用量（客户端会多收到一个 usage chunk）。
 - **重试与熔断**：上游错误按类重试（Auth 零重试；RateLimit 指数退避；其余立即换点），重试仅限首字节前，排除集上限 5；重试穷尽或不可重试时透传上游错误（Auth 类包装为 502）。熔断只隔离单渠道（进程内存态）。
 - **请求体限制**：入口请求体超过上限（默认 32MB，运行轨 `relay.max_body_bytes` 可调）本地快速失败 413。
-- **运行轨配置键**：`relay.max_body_bytes`（请求体上限）；`relay.virtual_model_groups`（虚拟模型组 JSON `{"组名":["成员",...]}`，`/v1/models` 只返回组名）。
+- **计费**（M1-wave3）：请求前按估算上浮 20% 冻结令牌余额（不足 403 拒绝）；响应完成后按实际 usage 多退少补（补扣允许透支到负数）；上游失败/流中断全额退款；usage 缺失按本地粗估计费并标记 `estimated`（logs.detail 可见）；模型未配价 503 拒绝。
+- **运行轨配置键**：`relay.max_body_bytes`（请求体上限）；`relay.virtual_model_groups`（虚拟模型组 JSON `{"组名":["成员",...]}`，`/v1/models` 只返回组名）；计费键 `billing_setting.billing_mode` / `billing_setting.billing_expr` / `billing_setting.billing_price`（模型名 → 模式声明 / 计费表达式 / 按次单价）与 `ModelRatio` / `CompletionRatio` / `GroupRatio`（classic 回退价与组倍率），管理面写后 Reload() 热生效。
 
 ### 4.2 POST /v1/chat/completions（OpenAI 兼容）
 
@@ -88,8 +90,10 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 | 400 | `invalid_request` | 请求体非法 JSON / 缺 `model` 字段 |
 | 401 | `missing_api_key` / `invalid_api_key` | 未携带 / 无效令牌 |
 | 403 | `token_disabled` / `token_expired` | 令牌禁用 / 过期 |
+| 403 | `insufficient_quota` | 令牌余额不足以预扣冻结（无副作用） |
 | 413 | `body_too_large` | 请求体超过本地上限 |
 | 502 | `upstream_auth_failed` | 渠道密钥错误（上游 401/403，零重试） |
 | 502 | `upstream_unreachable` / `upstream_error` | 上游网络不可达 / 重试穷尽后构造请求失败 |
 | 503 | `no_available_channel` | 模型无可用渠道（含全部熔断中 / 渠道组不匹配） |
+| 503 | `model_not_priced` | 模型未配置价格 / 价格配置不可用（服务端配置问题，错误信息不含内部细节） |
 | 透传 | 上游原样 | 重试穷尽或不可重试的非 Auth 上游错误（保持状态码与响应体） |

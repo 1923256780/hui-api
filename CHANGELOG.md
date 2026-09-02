@@ -9,6 +9,13 @@
 
 ### 新增
 
+- M1-wave3 计费内核 `internal/billing`：三模式计费引擎——classic_ratio 倍率线性（`round((input + completion×completion_ratio) × model_ratio × group_ratio × 500000 / 1e6)`）、tiered_expr 表达式（github.com/expr-lang/expr，`tier("base", expr)` 单层语义，编译结果并发安全缓存，变量 p=纯输入/c=输出/cr=缓存读（原始 tokens 数），表达式值 micro-USD，不叠乘组倍率）、per_call 按次（固定价 × group_ratio × 500000）；quota = round(计费值 × 500000 / 1e6)；未配价模型显式拒绝（HTTP 503 `model_not_priced`，配置声明不完整视为未配价）。
+- M1-wave3 价格单源：内置 `internal/billing/prices.json`（go:embed 打包，含版本号）；启动校验 schema（模式枚举、数值非负、表达式编译 + 零用量试求值）；价格查找顺序 options 显式声明 > `ModelRatio` 隐式 classic > 内置价单 > 拒绝服务；LookupPrice 返回不可变 ModelPrice 快照，单请求生命周期复用（防预扣与结算间配置热更导致口径漂移）。
+- M1-wave3 预扣费账本 `internal/billing/ledger.go`：Estimate 预扣估算（输入按请求体字节/4 粗估 + max_tokens 缺省 1024，计费后上浮 20%，最低 1 quota）；Freeze 事务内条件 UPDATE `WHERE remain_quota >= delta` 防透支（RowsAffected=0 → `ErrInsufficientQuota`，映射 403）；Settle 多退少补（差额 = 冻结 − 实结，补扣允许透支到负数）；RefundFull 全额退款；users.quota 与 tokens.remain_quota 同步扣减；unlimited 令牌三级跳过（冻结/结算/退款）。
+- M1-wave3 结算挂接 `internal/gateway`：Serve 在 relay Respond 成功后按 Usage 结算（relay.Usage.CacheReadTokens 从 PromptTokens 拆分为表达式变量，防缓存重复计费）；失败/流中断全额退款并日志标记 `aborted` + `refund_full`；usage 缺失但有正常内容 → 本地粗估并标记 `estimated`；logs.detail 记 billing_mode/token 明细（frozen/actual/prompt/completion/cache_read）/cache 命中/estimated/unlimited。
+- M1-wave3 异步请求日志 `internal/billing/logwriter.go`：强类型 LogRecord/Detail（Request/Token 字段不混用字符串拼 JSON）；有界 channel 非阻塞 Submit + 丢弃原子计数；攒批 flusher（批满或定时触发）；Close 幂等并 drain 在途批次；批量写入失败降级逐条落库。
+- M1-wave3 黄金测试集：`internal/billing/testdata/golden/billing_cases.json`（四条实测账单的数值转录，中性字段名 input_tokens/output_tokens/cache_read_tokens/expected_quota/model）；TestGoldenBilling 按 tiered_expr 公式对期望 quota 逐位断言（四舍五入口径一致）；含黄金文件竞品词自检。
+- M1-wave3 测试：计费三模式与 rounding 边界、tier() 表达式、GroupRatio 回退语义（未配置组 → default 组值 → 1.0）、编译缓存并发、价单校验（含试求值拒绝档位错）、Estimate、账本并发冻结结算（-race 防透支）、异步日志批量与 drain 与并发、gateway 计费挂接 11 用例（结算/补扣透支/流中断退款/estimated/未配价 503/余额不足 403/unlimited 跳过账本/三模式过线/停机日志排空/失败兜底退款）；`go test ./... -race` 十包全绿。
 - M1-wave2 双协议转发：`internal/relay` 转发内核（Protocol 适配接口、SSE 逐事件 flush 不缓冲不改写、JoinBaseURL 拼接含 /v1 去重、上游 scheme 白名单、非流式 64MB 读取上限）；`internal/relay/openai`（`POST /v1/chat/completions`：流式注入 `stream_options.include_usage`，usage 提取含 `cached_tokens`）；`internal/relay/anthropic`（`POST /v1/messages` 与 `POST /v1/messages/count_tokens`：x-api-key 与 Bearer 双鉴权、anthropic-version 透传/默认 2023-06-01、message_start 输入侧（含 cache_read_input_tokens）与 message_delta 累计输出侧 usage 归一）。
 - M1-wave2 路由编排 `internal/gateway`：tokens.key_hash 鉴权（SHA-256，内存缓存 TTL 30s + 负缓存 5s + 写时失效 + singleflight 防击穿）；Deployment 选择（启用渠道 → 协议/模型/排除集过滤 → priority 降序 → weight 加权随机，全零均匀）；熔断状态机（allowed_fails=3 / cooldown=5s / 429 立即冷却 / 分钟失败率>50% 且样本≥10 冷却，只隔离单渠道，进程内存态）；typed retry 策略表（Auth 零重试包装 502；RateLimit 指数退避 500ms 倍增封顶 4s；其余立即换点；重试仅限首字节前，排除集跨跳累积上限 5）；pre-call 检查（请求体上限 413、无可用渠道 503 语义错误、缺 model/坏 JSON 400）；`GET /v1/models`（启用渠道模型并集 + 虚拟模型组名，组内不展开）。
 - M1-wave2 参数改写 `internal/override`：param_override 管道（点分路径含数组下标，操作顺序固定 delete→set→append→replace→regex_replace，JSON 数字精度保留，正则预编译提前失败）；渠道级配置存 `channels.param_override`（schema v2，迁移 `migrations/0002_channel_param_override.sql`，DDL 对账测试升级为全迁移脚本）。
@@ -28,6 +35,7 @@
 
 ### 文档
 
+- M1-wave3：docs/01 设计点 4 落地标注与目录结构同步；docs/04 落地标注 + 新增「公式实测」节（四条黄金样例数值对齐）；docs/05 错误码表补 403/503 计费语义与计费运行轨键；docs/10 ROADMAP 重排（M1 完成、M2 重定义管理面 API）与状态块重写；docs/11 踩坑追加；新增 ADR 0004（计费引擎落地：expr 选型与 tier 单层语义）。
 - M1-wave2：docs/01 设计点 2/3 落地标注与目录结构同步（internal/channel 落地为 internal/gateway）；docs/05 转发面契约细化（请求/响应示例与错误码表）；docs/11 踩坑追加两条；docs/10 状态块与交接记录更新。
 - 新增 ADR 0003（存储层落地：单写多读与原子快照热更）；docs/01、docs/03 同步落地状态与实现细节；docs/02 补充 build.ps1 目标说明；docs/11 踩坑记录追加三条。
 
