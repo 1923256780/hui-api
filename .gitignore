@@ -4,6 +4,8 @@ web/dist/
 
 # 数据库与运行时产物
 *.db
+*.db-shm
+*.db-wal
 *.db.gz
 *.log
 
