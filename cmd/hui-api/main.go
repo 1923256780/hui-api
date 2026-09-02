@@ -22,7 +22,10 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/1923256780/hui-api/internal/config"
+	"github.com/1923256780/hui-api/internal/gateway"
 	"github.com/1923256780/hui-api/internal/hook"
+	"github.com/1923256780/hui-api/internal/relay/anthropic"
+	"github.com/1923256780/hui-api/internal/relay/openai"
 	"github.com/1923256780/hui-api/internal/store"
 	webui "github.com/1923256780/hui-api/web"
 )
@@ -108,7 +111,7 @@ func run(addrOverride, configPath string) error {
 	defer dispatcher.Stop(3 * time.Second)
 
 	// 5. 路由 + 前端 SPA。
-	engine := newRouter(rt, schemaVersion)
+	engine := newRouter(st, rt, schemaVersion)
 	engine.NoRoute(gin.WrapH(webui.Handler()))
 
 	srv := &http.Server{Addr: addr, Handler: engine}
@@ -139,9 +142,9 @@ func run(addrOverride, configPath string) error {
 	return nil
 }
 
-// newRouter 组装路由：/health 健康检查与 /api/status 状态端点。
-// 转发面（/v1/*）与剩余管理面端点在 M1-wave2 与 M3 逐波挂接。
-func newRouter(rt *config.Runtime, schemaVersion int64) *gin.Engine {
+// newRouter 组装路由：/health 健康检查、/api/status 状态端点与转发面 /v1/*。
+// 剩余管理面端点在 M3 逐波挂接。
+func newRouter(st *store.Store, rt *config.Runtime, schemaVersion int64) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -162,6 +165,14 @@ func newRouter(rt *config.Runtime, schemaVersion int64) *gin.Engine {
 			},
 		})
 	})
+
+	// 转发面（docs/05 端点清单）：编排在 gateway，协议适配在 relay/<protocol>。
+	gw := gateway.New(st, rt)
+	v1 := r.Group("/v1")
+	v1.POST("/chat/completions", func(c *gin.Context) { gw.Serve(c, openai.New()) })
+	v1.POST("/messages", func(c *gin.Context) { gw.Serve(c, anthropic.New()) })
+	v1.POST("/messages/count_tokens", func(c *gin.Context) { gw.Serve(c, anthropic.New()) })
+	v1.GET("/models", gw.HandleModels)
 	return r
 }
 

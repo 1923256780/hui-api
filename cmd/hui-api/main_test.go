@@ -29,7 +29,7 @@ func newTestRouter(t *testing.T) *gin.Engine {
 	if err != nil {
 		t.Fatalf("构造 Runtime 失败: %v", err)
 	}
-	return newRouter(rt, schemaVersion)
+	return newRouter(st, rt, schemaVersion)
 }
 
 // TestHandleHealth 固化 /health 契约：200 + JSON，且 status=ok。

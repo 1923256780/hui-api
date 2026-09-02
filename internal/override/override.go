@@ -37,11 +37,11 @@ type RegexOp struct {
 
 // Ops 是一份解析后的改写操作集。
 type Ops struct {
-	Delete       []string            `json:"delete"`
-	Set          map[string]any      `json:"set"`
-	Append       map[string]any      `json:"append"`
+	Delete       []string             `json:"delete"`
+	Set          map[string]any       `json:"set"`
+	Append       map[string]any       `json:"append"`
 	Replace      map[string]ReplaceOp `json:"replace"`
-	RegexReplace map[string]RegexOp  `json:"regex_replace"`
+	RegexReplace map[string]RegexOp   `json:"regex_replace"`
 }
 
 // Parse 解析 override 配置 JSON；空串视为空操作集（无任何改写）。
