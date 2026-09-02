@@ -41,6 +41,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
+      - name: 生成 web/dist 占位（go:embed 编译硬依赖；真实产物由 web job 构建）
+        run: |
+          mkdir -p web/dist
+          [ -f web/dist/index.html ] || echo '<!doctype html><meta charset="utf-8"><title>hui-api</title><p>placeholder</p>' > web/dist/index.html
       - name: go vet
         run: go vet ./...
       - name: go test
@@ -51,12 +55,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: web 构建占位
+      - name: web 构建（目录存在才启用）
         run: |
           if [ -d web ]; then
             cd web
             npm ci
             npm run build
           else
-            echo "web/ 尚未创建，跳过前端构建（M3 落地后自动启用）"
+            echo "web/ 尚未创建，跳过前端构建"
           fi

@@ -2,11 +2,14 @@
 # 用法：powershell -ExecutionPolicy Bypass -File scripts/check-competitor-words.ps1
 # 扫描范围排除：词表文件自身、workflow 目录、本脚本自身。
 $ErrorActionPreference = 'Stop'
+# git 输出统一按 UTF-8 解码，并关闭非 ASCII 路径转义（否则中文文件名变成 \346... 八进制串，
+# Test-Path 直接报错，导致本地扫描硬失败、CI 侧静默跳过中文文件名）。
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 # 仓库根 = 脚本所在目录（scripts/）的上一级，不依赖调用者工作目录
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $repoRoot
 try {
-    $words = Get-Content -LiteralPath '.github/competitor-words.txt' |
+    $words = Get-Content -LiteralPath '.github/competitor-words.txt' -Encoding UTF8 |
         Where-Object { $_.Trim() -and -not $_.TrimStart().StartsWith('#') } |
         ForEach-Object { $_.Trim() }
     if (-not $words) {
@@ -19,7 +22,7 @@ try {
         '^\.github/workflows/',
         '^scripts/check-competitor-words\.ps1$'
     )
-    $files = git ls-files | Where-Object {
+    $files = git -c core.quotepath=false ls-files | Where-Object {
         $f = $_
         -not ($excludes | Where-Object { $f -match $_ })
     }
