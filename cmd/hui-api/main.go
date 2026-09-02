@@ -21,6 +21,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/1923256780/hui-api/internal/billing"
 	"github.com/1923256780/hui-api/internal/config"
 	"github.com/1923256780/hui-api/internal/gateway"
 	"github.com/1923256780/hui-api/internal/hook"
@@ -111,7 +112,11 @@ func run(addrOverride, configPath string) error {
 	defer dispatcher.Stop(3 * time.Second)
 
 	// 5. 路由 + 前端 SPA。
-	engine := newRouter(st, rt, schemaVersion)
+	engine, gw, err := newRouter(st, rt, schemaVersion)
+	if err != nil {
+		return fmt.Errorf("组装路由: %w", err)
+	}
+	defer gw.Close() // 优雅停机排空异步请求日志（先行于存储层关闭）
 	engine.NoRoute(gin.WrapH(webui.Handler()))
 
 	srv := &http.Server{Addr: addr, Handler: engine}
@@ -143,8 +148,9 @@ func run(addrOverride, configPath string) error {
 }
 
 // newRouter 组装路由：/health 健康检查、/api/status 状态端点与转发面 /v1/*。
-// 剩余管理面端点在 M3 逐波挂接。
-func newRouter(st *store.Store, rt *config.Runtime, schemaVersion int64) *gin.Engine {
+// 剩余管理面端点在 M3 逐波挂接。计费引擎在此构造（内置价单启动校验，schema
+// 非法时 fail-fast 拒绝启动），同时返回 Gateway 供调用方停机时排空异步日志。
+func newRouter(st *store.Store, rt *config.Runtime, schemaVersion int64) (*gin.Engine, *gateway.Gateway, error) {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -166,14 +172,20 @@ func newRouter(st *store.Store, rt *config.Runtime, schemaVersion int64) *gin.En
 		})
 	})
 
+	// 计费引擎（docs/04）：价格来源 options 运行轨优先、内置 prices.json 兜底。
+	pricer, err := billing.NewEngine(rt)
+	if err != nil {
+		return nil, nil, fmt.Errorf("构造计费引擎: %w", err)
+	}
+
 	// 转发面（docs/05 端点清单）：编排在 gateway，协议适配在 relay/<protocol>。
-	gw := gateway.New(st, rt)
+	gw := gateway.New(st, rt, pricer)
 	v1 := r.Group("/v1")
 	v1.POST("/chat/completions", func(c *gin.Context) { gw.Serve(c, openai.New()) })
 	v1.POST("/messages", func(c *gin.Context) { gw.Serve(c, anthropic.New()) })
 	v1.POST("/messages/count_tokens", func(c *gin.Context) { gw.Serve(c, anthropic.New()) })
 	v1.GET("/models", gw.HandleModels)
-	return r
+	return r, gw, nil
 }
 
 // randomSecret 生成 32 字节随机密钥的 hex 编码（SESSION_SECRET 缺省兜底）。

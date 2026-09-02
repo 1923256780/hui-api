@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/1923256780/hui-api/internal/billing"
 	"github.com/1923256780/hui-api/internal/config"
 	"github.com/1923256780/hui-api/internal/gateway"
 	"github.com/1923256780/hui-api/internal/model"
@@ -115,7 +116,8 @@ func TestSmokeDualProtocol(t *testing.T) {
 	plain := "sk-smoke-e2e-0001"
 	if err := st.Write.Create(&model.Token{UserID: 1, Name: "smoke", Key: plain,
 		KeyHash: gateway.HashKey(plain), Status: model.StatusEnabled,
-		ExpiredTime: model.EpochForever, CreatedTime: time.Now().Unix()}).Error; err != nil {
+		ExpiredTime: model.EpochForever, UnlimitedQuota: true,
+		CreatedTime: time.Now().Unix()}).Error; err != nil {
 		t.Fatalf("写入令牌失败: %v", err)
 	}
 	now := time.Now().Unix()
@@ -130,14 +132,25 @@ func TestSmokeDualProtocol(t *testing.T) {
 		t.Fatalf("写入 Anthropic 渠道失败: %v", err)
 	}
 
+	// 模型价：smoke 模型经 ModelRatio 隐式 classic 配价（键语义 docs/03/04），
+	// 未配价模型在 Serve 即被 503 拒绝。
+	if err := st.Write.Create(&model.Option{Key: billing.OptionKeyModelRatio,
+		Value: `{"gpt-smoke":0.5,"claude-smoke":0.5}`}).Error; err != nil {
+		t.Fatalf("写入模型价格失败: %v", err)
+	}
 	rt, err := config.NewRuntime(st)
 	if err != nil {
 		t.Fatalf("构造运行轨失败: %v", err)
 	}
 
 	// 本地起服务（与 run() 相同的完整路由）。
-	srv := httptest.NewServer(newRouter(st, rt, schemaVersion))
+	engine, gw, err := newRouter(st, rt, schemaVersion)
+	if err != nil {
+		t.Fatalf("组装路由失败: %v", err)
+	}
+	srv := httptest.NewServer(engine)
 	t.Cleanup(srv.Close)
+	t.Cleanup(gw.Close) // 后注册先执行：先排空日志（写库），再关 HTTP 与存储
 	base := srv.URL
 	client := &http.Client{}
 	auth := http.Header{"Authorization": []string{"Bearer " + plain}}
