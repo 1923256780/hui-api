@@ -1,0 +1,8 @@
+# hui-api bootstrap 配置样例（启动轨，docs/01 设计点 7）。
+# 复制为 config.yaml 后修改；真实 config.yaml 已被 .gitignore 排除，保证 GitOps 可 diff 的只有本样例。
+# 优先级：命令行参数 > 环境变量（PORT / SQLITE_PATH / SESSION_SECRET）> 本文件 > 代码默认值。
+# 运行时业务配置不走本文件，而是存 options 表（运行轨），经管理面热更（M2 提供 API）。
+
+addr: ":3100"              # HTTP 监听地址；等价环境变量 PORT（纯数字自动补冒号）
+sqlite_path: "hui-api.db"  # SQLite 数据库文件路径；等价环境变量 SQLITE_PATH
+session_secret: ""         # 管理台会话密钥；留空则启动时随机生成（重启后已有会话失效）
