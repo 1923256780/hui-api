@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/1923256780/hui-api/internal/billing"
 	"github.com/1923256780/hui-api/internal/config"
 	"github.com/1923256780/hui-api/internal/model"
 	"github.com/1923256780/hui-api/internal/relay/anthropic"
@@ -25,7 +26,8 @@ import (
 // ---- 测试基建 ----
 
 // newTestGateway 构造临时库 + 运行轨 + 网关，并写入一枚启用令牌，返回明文。
-// options 为预写入的运行轨键值（构造 Runtime 前落库，随首次加载生效）。
+// options 为预写入的运行轨键值（构造 Runtime 前落库，随首次加载生效），
+// 覆盖默认注入的编排级模型价（未配价模型在 Serve 步骤 4 即被拒绝）。
 func newTestGateway(t *testing.T, options map[string]string) (*Gateway, *store.Store, string) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -36,7 +38,15 @@ func newTestGateway(t *testing.T, options map[string]string) (*Gateway, *store.S
 	if _, err := st.Migrate(); err != nil {
 		t.Fatalf("迁移失败: %v", err)
 	}
+	// 编排级既有测试的模型价兜底（隐式 classic，键语义 docs/03/04）；
+	// 计费链路测试（billing_test.go）按需以显式 billing_setting.* 覆盖。
+	merged := map[string]string{
+		billing.OptionKeyModelRatio: `{"m1":0.5,"claude-x":0.5,"absent":0.5}`,
+	}
 	for k, v := range options {
+		merged[k] = v
+	}
+	for k, v := range merged {
 		if err := st.Write.Create(&model.Option{Key: k, Value: v}).Error; err != nil {
 			t.Fatalf("写入 option %s 失败: %v", k, err)
 		}
@@ -45,7 +55,13 @@ func newTestGateway(t *testing.T, options map[string]string) (*Gateway, *store.S
 	if err != nil {
 		t.Fatalf("构造运行轨失败: %v", err)
 	}
-	g := New(st, rt)
+	pricer, err := billing.NewEngine(rt)
+	if err != nil {
+		t.Fatalf("构造计费引擎失败: %v", err)
+	}
+	g := New(st, rt, pricer)
+	// 排空异步日志先行于存储层关闭（Cleanup 后进先出），避免停机后 flush 撞库。
+	t.Cleanup(func() { g.Close() })
 	plain := seedToken(t, st, nil)
 	return g, st, plain
 }

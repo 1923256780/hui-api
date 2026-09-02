@@ -47,13 +47,15 @@ func (a *atomicInt64) Store(v int64) {
 	a.v = v
 }
 
-// seedToken 写入测试令牌并返回明文。
+// seedToken 写入测试令牌并返回明文。默认 unlimited（编排级既有测试不依赖账本）；
+// 计费链路测试用 mutate 覆盖为带余额令牌（见 billing_test.go）。
 func seedToken(t *testing.T, st *store.Store, mutate func(*model.Token)) string {
 	t.Helper()
 	plain := "sk-test-" + time.Now().Format("150405.000000000")
 	tok := &model.Token{
 		UserID: 1, Name: "t", Key: plain, KeyHash: HashKey(plain),
 		Status: model.StatusEnabled, ExpiredTime: model.EpochForever,
+		UnlimitedQuota: true,
 	}
 	if mutate != nil {
 		mutate(tok)

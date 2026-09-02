@@ -12,7 +12,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/1923256780/hui-api/internal/billing"
 	"github.com/1923256780/hui-api/internal/config"
+	"github.com/1923256780/hui-api/internal/model"
 	"github.com/1923256780/hui-api/internal/override"
 	"github.com/1923256780/hui-api/internal/relay"
 	"github.com/1923256780/hui-api/internal/store"
@@ -24,12 +26,15 @@ const (
 	DefaultMaxBodyBytes = 32 << 20
 	// upstreamTimeout 每跳上游请求超时（流式连接也受其约束，由 client Timeout 生效）。
 	upstreamTimeout = 120 * time.Second
+	// logCloseTimeout 优雅停机时异步日志排空等待窗口。
+	logCloseTimeout = 2 * time.Second
 )
 
 // OptionKeyMaxBodyBytes 是 options 运行轨的请求体上限键（热更）。
 const OptionKeyMaxBodyBytes = "relay.max_body_bytes"
 
-// Gateway 是转发链路编排器：鉴权 → pre-call → 选择 → override → 转发 → 重试。
+// Gateway 是转发链路编排器：鉴权 → 计费预扣 → pre-call → 选择 → override →
+// 转发 → 结算 → 日志。计费内核在 internal/billing，本层只编排不实现计费公式。
 type Gateway struct {
 	st      *store.Store
 	rt      *config.Runtime
@@ -37,10 +42,13 @@ type Gateway struct {
 	sel     *Selector
 	breaker *BreakerRegistry
 	client  *http.Client
+	price   *billing.Engine         // 计费引擎（价格解析与三模式求值）
+	ledger  *billing.Ledger         // 预扣费账本（冻结/多退少补/退款）
+	logs    *billing.AsyncLogWriter // 请求日志异步批量落库
 }
 
-// New 构造网关。
-func New(st *store.Store, rt *config.Runtime) *Gateway {
+// New 构造网关。pricer 为已通过内置价单校验的计费引擎（main 启动时 fail-fast 构造）。
+func New(st *store.Store, rt *config.Runtime, pricer *billing.Engine) *Gateway {
 	return &Gateway{
 		st:      st,
 		rt:      rt,
@@ -54,6 +62,9 @@ func New(st *store.Store, rt *config.Runtime) *Gateway {
 				return http.ErrUseLastResponse
 			},
 		},
+		price:  pricer,
+		ledger: billing.NewLedger(st),
+		logs:   billing.NewAsyncLogWriter(st),
 	}
 }
 
@@ -62,6 +73,9 @@ func (g *Gateway) Auth() *TokenAuth { return g.auth }
 
 // Breaker 暴露熔断注册表（M3 管理面复位挂接点）。
 func (g *Gateway) Breaker() *BreakerRegistry { return g.breaker }
+
+// Close 优雅停机排空异步日志（main 收尾调用）。
+func (g *Gateway) Close() { g.logs.Close(logCloseTimeout) }
 
 // maxBodyBytes 读取入口请求体上限（运行轨热更，缺省 32MB）。
 func (g *Gateway) maxBodyBytes() int64 {
@@ -75,9 +89,11 @@ func (g *Gateway) maxBodyBytes() int64 {
 	return v
 }
 
-// Serve 处理一次转发请求：完整执行鉴权、pre-call、选择、改写、转发与重试。
-// 这是所有转发面端点的唯一编排入口，协议差异全部收敛在 proto 实现里。
+// Serve 处理一次转发请求：完整执行鉴权、计费预扣、pre-call、选择、改写、转发、
+// 结算与日志。这是所有转发面端点的唯一编排入口，协议差异全部收敛在 proto 实现里。
 func (g *Gateway) Serve(c *gin.Context, proto relay.Protocol) {
+	start := time.Now()
+
 	// ---- 1. 鉴权：提取客户端密钥 → key_hash 校验（缓存/库）。
 	key, ok := proto.ExtractKey(c)
 	if !ok || strings.TrimSpace(key) == "" {
@@ -119,7 +135,83 @@ func (g *Gateway) Serve(c *gin.Context, proto relay.Protocol) {
 		return
 	}
 
-	// ---- 4. 重试循环：typed retry，重试仅限首字节前（2xx 交给 Respond 后不再重试）。
+	// ---- 4. 计费预检：解析价格快照；未配价显式拒绝（docs/04 第五节）。
+	price, err := g.price.LookupPrice(pr.Model)
+	if err != nil {
+		if errors.Is(err, billing.ErrUnpriced) {
+			log.Printf("[billing] 未配价模型拒绝服务: %v", err)
+			proto.WriteError(c, http.StatusServiceUnavailable, "model_not_priced", "模型暂未配置价格")
+		} else {
+			log.Printf("[billing] 价格解析失败: %v", err)
+			proto.WriteError(c, http.StatusServiceUnavailable, "model_not_priced", "模型价格配置不可用")
+		}
+		return
+	}
+
+	// ---- 5. 预扣冻结：估算上浮 20%，事务内条件扣减防透支（docs/04 第三节）。
+	// unlimited 令牌跳过账本（frozen=0）。价格快照全请求复用，热更不影响在途请求口径。
+	group := billing.DefaultGroup
+	frozen := int64(0)
+	if !tok.UnlimitedQuota {
+		frozen = g.price.Estimate(price, group, raw, extractMaxTokens(raw))
+		if err := g.ledger.Freeze(tok.ID, tok.UserID, frozen); err != nil {
+			if errors.Is(err, billing.ErrInsufficientQuota) {
+				proto.WriteError(c, http.StatusForbidden, "insufficient_quota", "令牌余额不足")
+			} else {
+				log.Printf("[billing] 预扣冻结失败 token=%d: %v", tok.ID, err)
+				proto.WriteError(c, http.StatusInternalServerError, "gateway_error", "计费冻结失败")
+			}
+			return
+		}
+	}
+
+	// ---- 6. 结算兜底：任何未走显式结算的退出路径（重试穷尽 / 无渠道 / panic 除外）
+	// 全额退款并记 aborted 日志。settled 标志保证退款与日志恰好一次。
+	settled := false
+	detail := billing.Detail{
+		Mode:      string(price.Mode),
+		Expr:      price.Expr,
+		Frozen:    frozen,
+		Unlimited: tok.UnlimitedQuota,
+	}
+	if price.Mode == billing.ModeClassicRatio {
+		detail.ModelRatio = price.ModelRatio
+		detail.CompRatio = price.CompletionRatio
+	}
+	logDone := false
+	submitLog := func(prompt, completion, quota int, d billing.Detail) {
+		if logDone {
+			return
+		}
+		logDone = true
+		g.logs.Submit(billing.LogRecord{
+			UserID:           tok.UserID,
+			TokenID:          tok.ID,
+			Protocol:         proto.Name(),
+			ModelName:        pr.Model,
+			PromptTokens:     prompt,
+			CompletionTokens: completion,
+			Quota:            int64(quota),
+			UseTime:          int64(time.Since(start).Seconds()),
+			IsStream:         pr.Stream,
+			CreatedTime:      start.Unix(),
+			Detail:           d,
+		})
+	}
+	defer func() {
+		if frozen > 0 && !settled {
+			if err := g.ledger.RefundFull(tok.ID, tok.UserID, frozen); err != nil {
+				log.Printf("[billing] 全额退款失败 token=%d frozen=%d: %v", tok.ID, frozen, err)
+			} else {
+				log.Printf("[relay] 请求未完成，已全额退款 model=%s token=%d frozen=%d", pr.Model, tok.ID, frozen)
+			}
+			detail.Aborted = true
+			detail.RefundFull = true
+		}
+		submitLog(0, 0, 0, detail)
+	}()
+
+	// ---- 7. 重试循环：typed retry，重试仅限首字节前（2xx 交给 Respond 后不再重试）。
 	excluded := make(map[int64]bool, MaxExcluded) // 排除集：跨跳累积、按渠道 ID 去重
 	attempt := 0
 	for {
@@ -200,17 +292,126 @@ func (g *Gateway) Serve(c *gin.Context, proto relay.Protocol) {
 			return
 		}
 
-		// ---- 5. 2xx：交给协议适配层转发（流式逐事件 flush / 非流式透传）。
+		// ---- 8. 2xx：协议适配层转发（流式逐事件 flush / 非流式透传）+ 计费结算。
 		// 从此处起首字节即将写出，任何失败都不再重试。
 		g.breaker.OnSuccess(ch.ID)
-		usage, err := proto.Respond(c, resp, pr)
-		if err != nil {
-			log.Printf("[relay] 渠道 %d 响应转发失败 model=%s: %v", ch.ID, pr.Model, err)
+		usage, respErr := proto.Respond(c, resp, pr)
+		if respErr != nil {
+			log.Printf("[relay] 渠道 %d 响应转发失败 model=%s: %v", ch.ID, pr.Model, respErr)
 		}
-		log.Printf("[relay] %s model=%s channel=%d token=%d stream=%v prompt=%d completion=%d",
-			proto.Name(), pr.Model, ch.ID, tok.ID, pr.Stream, usage.PromptTokens, usage.CompletionTokens)
+		actual, d := g.settle(tok, price, group, frozen, raw, c, usage, respErr)
+		detail = d
+		settled = true
+		submitLog(logPromptTokens(usage, detail.Estimated, raw),
+			logCompletionTokens(usage, detail.Estimated, c), int(actual), detail)
+
+		log.Printf("[relay] %s model=%s channel=%d token=%d stream=%v prompt=%d completion=%d quota=%d frozen=%d",
+			proto.Name(), pr.Model, ch.ID, tok.ID, pr.Stream,
+			usage.PromptTokens, usage.CompletionTokens, actual, frozen)
 		return
 	}
+}
+
+// settle 是 Respond 之后的统一结算：成功按实际 usage 多退少补；usage 缺失但有
+// 正常内容 → 本地粗估并标记 estimated；转发失败/流中断 → 全额退款并标记 aborted
+// （docs/04 第三、四节）。返回实结 quota 与落库明细。
+func (g *Gateway) settle(tok *model.Token, price *billing.ModelPrice, group string,
+	frozen int64, raw []byte, c *gin.Context, usage relay.Usage, respErr error) (int64, billing.Detail) {
+
+	detail := billing.Detail{
+		Mode:      string(price.Mode),
+		Expr:      price.Expr,
+		Frozen:    frozen,
+		Unlimited: tok.UnlimitedQuota,
+		GroupRatio: g.price.GroupRatio(group),
+	}
+	if price.Mode == billing.ModeClassicRatio {
+		detail.ModelRatio = price.ModelRatio
+		detail.CompRatio = price.CompletionRatio
+	}
+	detail.CacheRead = min(max(usage.CacheReadTokens, 0), usage.PromptTokens)
+	detail.BilledIn = usage.PromptTokens - detail.CacheRead
+
+	// ---- 流中断 / 转发失败：全额退款（宁可少收不多收）。
+	if respErr != nil {
+		if frozen > 0 {
+			if err := g.ledger.RefundFull(tok.ID, tok.UserID, frozen); err != nil {
+				log.Printf("[billing] 流中断退款失败 token=%d frozen=%d: %v", tok.ID, frozen, err)
+			}
+		}
+		detail.Aborted = true
+		detail.RefundFull = frozen > 0
+		return 0, detail
+	}
+
+	// ---- 结算计费。
+	var actual int64
+	var err error
+	switch {
+	case usage.PromptTokens == 0 && usage.CompletionTokens == 0:
+		// usage 缺失但有正常内容：本地粗估（输入按请求体、输出按已写字节，4B/token）
+		// 并标记 estimated。粗估口径偏保守（缓存折扣不可知，按全价输入计）。
+		est := billing.Usage{
+			Input:      len(raw) / billing.BytesPerTokenEstimate,
+			Completion: c.Writer.Size() / billing.BytesPerTokenEstimate,
+		}
+		actual, err = g.price.Charge(price, group, est)
+		detail.Estimated = true
+		detail.BilledIn = est.Input
+	default:
+		actual, err = g.price.Charge(price, group, billing.Usage{
+			Input:      usage.PromptTokens,
+			Completion: usage.CompletionTokens,
+			CacheRead:  usage.CacheReadTokens,
+		})
+	}
+	if err != nil {
+		// 计费求值失败（理论不可达：Lookup 已校验表达式）。全额退款，宁可少收。
+		log.Printf("[billing] 结算计费失败(模型 %s): %v", price.Model, err)
+		if frozen > 0 {
+			if err := g.ledger.RefundFull(tok.ID, tok.UserID, frozen); err != nil {
+				log.Printf("[billing] 结算失败退款异常 token=%d: %v", tok.ID, err)
+			}
+		}
+		detail.Aborted = true
+		detail.RefundFull = frozen > 0
+		detail.Err = "settle_charge_failed"
+		return 0, detail
+	}
+
+	// ---- 多退少补（unlimited 令牌跳过账本：冻结与补扣均不记账，日志仍记实结 quota）。
+	if !tok.UnlimitedQuota {
+		if err := g.ledger.Settle(tok.ID, tok.UserID, frozen, actual); err != nil {
+			log.Printf("[billing] 多退少补失败 token=%d frozen=%d actual=%d: %v", tok.ID, frozen, actual, err)
+		}
+	}
+	return actual, detail
+}
+
+// logPromptTokens 返回日志应记录的输入 tokens：estimated 粗估值，否则上游原值。
+func logPromptTokens(usage relay.Usage, estimated bool, raw []byte) int {
+	if estimated {
+		return len(raw) / billing.BytesPerTokenEstimate
+	}
+	return usage.PromptTokens
+}
+
+// logCompletionTokens 返回日志应记录的输出 tokens：estimated 按已写字节粗估，否则上游原值。
+func logCompletionTokens(usage relay.Usage, estimated bool, c *gin.Context) int {
+	if estimated {
+		return c.Writer.Size() / billing.BytesPerTokenEstimate
+	}
+	return usage.CompletionTokens
+}
+
+// extractMaxTokens 从请求体提取 max_tokens（OpenAI/Anthropic 同名字段）；
+// 缺失或非法时返回 0（由 Estimate 取缺省估算值）。
+func extractMaxTokens(raw []byte) int {
+	var probe struct {
+		MaxTokens int `json:"max_tokens"`
+	}
+	_ = json.Unmarshal(raw, &probe)
+	return probe.MaxTokens
 }
 
 // markExcludedAndDecide 把渠道加入排除集；返回 false 表示仍可继续重试。
