@@ -28,7 +28,7 @@ func openTestStore(t *testing.T) *Store {
 	return st
 }
 
-// TestOpenMigrateIdempotent 验证迁移幂等：重复 Migrate 不报错且 schema_version 恒为 1。
+// TestOpenMigrateIdempotent 验证迁移幂等：重复 Migrate 不报错且 schema_version 恒为当前版本。
 func TestOpenMigrateIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "idempotent.db")
 	st, err := Open(path)
@@ -229,7 +229,8 @@ func TestSixTablesCRUD(t *testing.T) {
 	}
 }
 
-// TestDDLEquivalence 双源一致性：0001_init.sql 建出的表与 AutoMigrate 建出的表列集合一致。
+// TestDDLEquivalence 双源一致性：migrations/*.sql 按文件名顺序执行建出的表，
+// 与 AutoMigrate 建出的表列集合一致（0001 基线 + 后续 up-only 迁移叠加）。
 func TestDDLEquivalence(t *testing.T) {
 	dir := t.TempDir()
 	autoPath := filepath.Join(dir, "auto.db")
@@ -245,19 +246,35 @@ func TestDDLEquivalence(t *testing.T) {
 		t.Fatalf("auto 库迁移失败: %v", err)
 	}
 
-	// 文档源：直接执行 0001_init.sql。
+	// 文档源：按文件名顺序执行 migrations 目录全部 .sql（0001 基线 + 后续迁移）。
 	ddlSt, err := Open(ddlPath)
 	if err != nil {
 		t.Fatalf("打开 ddl 库失败: %v", err)
 	}
 	defer func() { _ = ddlSt.Close() }()
-	ddlBytes, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0001_init.sql"))
+	entries, err := os.ReadDir(filepath.Join("..", "..", "migrations"))
 	if err != nil {
-		t.Fatalf("读取 0001_init.sql 失败: %v", err)
+		t.Fatalf("读取 migrations 目录失败: %v", err)
 	}
-	for _, stmt := range splitSQLStatements(string(ddlBytes)) {
-		if err := ddlSt.Write.Exec(stmt).Error; err != nil {
-			t.Fatalf("执行 DDL 语句失败: %v\n语句: %s", err, stmt)
+	var sqlFiles []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+			sqlFiles = append(sqlFiles, e.Name())
+		}
+	}
+	sort.Strings(sqlFiles)
+	if len(sqlFiles) == 0 {
+		t.Fatal("migrations 目录无 SQL 迁移脚本")
+	}
+	for _, name := range sqlFiles {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))
+		if err != nil {
+			t.Fatalf("读取 %s 失败: %v", name, err)
+		}
+		for _, stmt := range splitSQLStatements(string(raw)) {
+			if err := ddlSt.Write.Exec(stmt).Error; err != nil {
+				t.Fatalf("执行 %s 语句失败: %v\n语句: %s", name, err, stmt)
+			}
 		}
 	}
 

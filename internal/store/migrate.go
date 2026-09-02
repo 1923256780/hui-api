@@ -13,7 +13,11 @@ import (
 // SchemaVersion 是当前代码对应的库 schema 版本。0001 基线由 AutoMigrate 以
 // internal/model 为唯一源建表；后续 schema 变更按 docs/03 第四节规则以
 // 只前进（up-only）的 SQL 迁移脚本叠加，本常量随之递增且禁止回退。
-const SchemaVersion int64 = 1
+//
+// 版本历史：
+//	1（M1-wave1）六表基线；
+//	2（M1-wave2）channels 新增 param_override 列（0002_channel_param_override.sql）。
+const SchemaVersion int64 = 2
 
 // OptionKeySchemaVersion 是 options 表中记录 schema 版本的键。
 const OptionKeySchemaVersion = "schema_version"
@@ -22,7 +26,8 @@ const OptionKeySchemaVersion = "schema_version"
 //
 // 规则（docs/03 第四节）：
 //  1. 基线（版本 1）：AutoMigrate 以 internal/model 为源创建六表；
-//  2. 迁移幂等：重复启动重复执行不产生副作用；
+//  2. 迁移幂等：重复启动重复执行不产生副作用；AutoMigrate 对后续版本的新列
+//     同样自动补齐（与 migrations/*.sql 文档源保持等价，由 TestDDLEquivalence 对账）；
 //  3. 成功后把 schema_version 写入 options 表；
 //  4. 禁止修改历史迁移：本波之后的新变更走新版本号迁移，不回改基线。
 func (s *Store) Migrate() (int64, error) {

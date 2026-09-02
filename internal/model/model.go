@@ -39,17 +39,18 @@ const (
 
 // Channel 上游渠道配置：地址、密钥、模型清单、优先级/权重、状态。
 type Channel struct {
-	ID          int64  `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
-	Name        string `gorm:"column:name;size:128;not null;default:''" json:"name"`
-	Type        int    `gorm:"column:type;not null;default:1" json:"type"`
-	BaseURL     string `gorm:"column:base_url;size:512;not null;default:''" json:"base_url"`
-	Key         string `gorm:"column:key;size:512;not null;default:''" json:"-"` // 上游密钥，禁止序列化输出
-	Models      string `gorm:"column:models;size:2048;not null;default:''" json:"models"`
-	Priority    int64  `gorm:"column:priority;not null;default:0" json:"priority"`
-	Weight      int64  `gorm:"column:weight;not null;default:0" json:"weight"`
-	Status      int    `gorm:"column:status;not null;default:1" json:"status"`
-	CreatedTime int64  `gorm:"column:created_time;not null;default:0" json:"created_time"`
-	UpdatedTime int64  `gorm:"column:updated_time;not null;default:0" json:"updated_time"`
+	ID            int64  `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
+	Name          string `gorm:"column:name;size:128;not null;default:''" json:"name"`
+	Type          int    `gorm:"column:type;not null;default:1" json:"type"`
+	BaseURL       string `gorm:"column:base_url;size:512;not null;default:''" json:"base_url"`
+	Key           string `gorm:"column:key;size:512;not null;default:''" json:"-"` // 上游密钥，禁止序列化输出
+	Models        string `gorm:"column:models;size:2048;not null;default:''" json:"models"`
+	Priority      int64  `gorm:"column:priority;not null;default:0" json:"priority"`
+	Weight        int64  `gorm:"column:weight;not null;default:0" json:"weight"`
+	Status        int    `gorm:"column:status;not null;default:1" json:"status"`
+	ParamOverride string `gorm:"column:param_override;size:2048;not null;default:''" json:"param_override"` // 渠道级请求参数改写 JSON（M1-wave2），语义见 internal/override
+	CreatedTime   int64  `gorm:"column:created_time;not null;default:0" json:"created_time"`
+	UpdatedTime   int64  `gorm:"column:updated_time;not null;default:0" json:"updated_time"`
 }
 
 // TableName 显式指定表名，避免依赖 GORM 复数化推断。
