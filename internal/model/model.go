@@ -57,7 +57,7 @@ type Channel struct {
 func (Channel) TableName() string { return "channels" }
 
 // Token 访问令牌：明文仅在创建时返回一次，库内鉴权唯一依据是 key_hash（SHA-256 hex）。
-// ExpiredTime = -1 表示永不过期；BudgetDuration 支持 '', '24h', '7d', '30d', 'monthly'。
+// ExpiredTime = -1 表示永不过期；BudgetDuration 支持 ”, '24h', '7d', '30d', 'monthly'。
 type Token struct {
 	ID             int64  `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
 	UserID         int64  `gorm:"column:user_id;not null;default:0;index" json:"user_id"`

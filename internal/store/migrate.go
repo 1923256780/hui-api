@@ -15,6 +15,7 @@ import (
 // 只前进（up-only）的 SQL 迁移脚本叠加，本常量随之递增且禁止回退。
 //
 // 版本历史：
+//
 //	1（M1-wave1）六表基线；
 //	2（M1-wave2）channels 新增 param_override 列（0002_channel_param_override.sql）。
 const SchemaVersion int64 = 2
