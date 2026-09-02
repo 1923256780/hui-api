@@ -1,0 +1,50 @@
+/* hui-api 管理台全局样式（M1-wave1 外壳最简版，设计系统在 M4 细化）。 */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+/* 登录页：深蓝渐变底 + 居中卡片 */
+.login-backdrop {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #0f1b3d 0%, #1c2f5e 45%, #2f54eb 130%);
+}
+
+.login-card {
+  width: 360px;
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(6, 15, 44, 0.45);
+}
+
+/* 侧边栏品牌区 */
+.sider-brand {
+  height: 64px;
+  color: #fff;
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 顶部栏 */
+.app-header {
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.app-header-actions {
+  display: inline-flex;
+  align-items: center;
+}
