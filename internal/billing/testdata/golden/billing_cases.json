@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "description": "计费黄金测试集（tiered_expr 四舍五入口径固化）。来源：生产环境四条实测账单的数值转录（input/output tokens 与精确 quota 逐位对齐）。口径：p=纯输入、c=输出、cr=缓存读，变量单位为原始 tokens 数；单价为每百万 tokens 美元价（乘积单位 micro-USD）；quota = round((p×单价 + c×单价 + cr×单价) × 500000 / 1e6)；tiered_expr 不叠乘组倍率。",
+  "cases": [
+    {
+      "name": "case-01-heavy-context",
+      "model": "golden-model-a",
+      "mode": "tiered_expr",
+      "expr": "tier(\"base\", p * 0.15 + c * 0.5 + cr * 0)",
+      "input_tokens": 371253,
+      "output_tokens": 3248,
+      "cache_read_tokens": 0,
+      "expected_quota": 28656
+    },
+    {
+      "name": "case-02-light-round-down",
+      "model": "golden-model-a",
+      "mode": "tiered_expr",
+      "expr": "tier(\"base\", p * 0.15 + c * 0.5 + cr * 0)",
+      "input_tokens": 15,
+      "output_tokens": 92,
+      "cache_read_tokens": 0,
+      "expected_quota": 24
+    },
+    {
+      "name": "case-03-repriced-round-up",
+      "model": "golden-model-b",
+      "mode": "tiered_expr",
+      "expr": "tier(\"base\", p * 0.18 + c * 0.6 + cr * 0)",
+      "input_tokens": 15,
+      "output_tokens": 114,
+      "cache_read_tokens": 0,
+      "expected_quota": 36
+    },
+    {
+      "name": "case-04-repriced-acceptance",
+      "model": "golden-model-b",
+      "mode": "tiered_expr",
+      "expr": "tier(\"base\", p * 0.18 + c * 0.6 + cr * 0)",
+      "input_tokens": 15,
+      "output_tokens": 60,
+      "cache_read_tokens": 0,
+      "expected_quota": 19
+    }
+  ]
+}

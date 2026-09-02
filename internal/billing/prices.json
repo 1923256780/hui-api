@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "updated_at": "2026-09-02",
+  "description": "hui-api 内置兜底价格单。查找顺序：options 运行轨（billing_setting.* / ModelRatio / CompletionRatio / GroupRatio）优先，本文件兜底，均未命中则拒绝服务。价格为每百万 tokens 的美元单价（per_call 为美元/次）；表达式变量 p=纯输入、c=输出、cr=缓存读，单位为原始 tokens 数（系数为每百万 tokens 美元价）。真实模型价格由部署方经管理面 options 配置热更，本文件仅维护示例与回归锚点。",
+  "models": {
+    "example-classic": {
+      "mode": "classic_ratio",
+      "model_ratio": 0.15,
+      "completion_ratio": 3.33
+    },
+    "example-tiered": {
+      "mode": "tiered_expr",
+      "expr": "tier(\"base\", p * 0.15 + c * 0.6 + cr * 0.014)"
+    },
+    "example-per-call": {
+      "mode": "per_call",
+      "per_call_price": 0.02
+    }
+  }
+}
