@@ -1,0 +1,26 @@
+# 依赖产物
+node_modules/
+web/dist/
+
+# 数据库与运行时产物
+*.db
+*.db.gz
+*.log
+
+# 环境变量与密钥
+.env
+.env.*
+
+# 构建产物
+bin/
+dist/
+*.exe
+
+# 测试与覆盖率
+coverage*
+*.out
+
+# 编辑器与系统文件
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,46 @@
+name: Bug 报告
+description: 反馈 hui-api 的问题或异常行为
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 期望行为与实际行为的差异。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 配置 ...
+        2. 请求 ...
+        3. 观察 ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / commit
+      description: `hui-api -version` 的输出或 commit hash。
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志与截图
+      description: |
+        粘贴相关日志（注意脱敏：不要包含密钥、令牌明文、真实用户数据）。
+  - type: dropdown
+    id: area
+    attributes:
+      label: 影响范围
+      options:
+        - 转发面（/v1/*）
+        - 管理面（/api/*）
+        - 计费/配额
+        - 部署/运维
+        - 其他
+    validations:
+      required: true

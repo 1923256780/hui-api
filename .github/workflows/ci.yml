@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  competitor-words:
+    name: 竞品词扫描
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 扫描仓库内竞品词
+        run: |
+          # 词表从文件读取（含注释过滤），workflow 文件本身不含任何竞品词
+          pattern=$(grep -v '^#' .github/competitor-words.txt | tr -d '\r' | paste -sd '|' -)
+          if [ -z "$pattern" ]; then
+            echo "词表为空，跳过扫描"
+            exit 0
+          fi
+          # 排除：词表文件自身、workflow 目录、检查脚本自身
+          files=$(git ls-files | grep -v -E '^\.github/competitor-words\.txt$|^\.github/workflows/|^scripts/check-competitor-words\.ps1$')
+          if [ -z "$files" ]; then
+            echo "无被扫文件，跳过"
+            exit 0
+          fi
+          hits=$(printf '%s\n' "$files" | xargs -r grep -l -i -E "$pattern" || true)
+          if [ -n "$hits" ]; then
+            echo "::error::以下文件包含竞品词，请改用中性表述（规则见 docs/decisions/0002）："
+            echo "$hits"
+            exit 1
+          fi
+          echo "竞品词扫描通过"
+
+  go:
+    name: Go vet + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test -v ./...
+
+  web:
+    name: 前端构建（web/ 存在时）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: web 构建占位
+        run: |
+          if [ -d web ]; then
+            cd web
+            npm ci
+            npm run build
+          else
+            echo "web/ 尚未创建，跳过前端构建（M3 落地后自动启用）"
+          fi

@@ -1,0 +1,11 @@
+# 竞品词表（CI grep 扫描用，大小写不敏感，子串匹配）
+# 规则：仓库内任何文件不得包含下列词（含影射变体）。
+# 本文件自身、.github/workflows/ 与检查脚本被扫描排除。
+# 新增词条时同步更新 scripts/check-competitor-words.ps1 的排除清单（如脚本改名）。
+new-api
+new_api
+newapi
+one-api
+one_api
+oneapi
+litellm

@@ -1,0 +1,22 @@
+# Release Notes 自动分类配置（按 PR 标签归类）
+changelog:
+  exclude:
+    labels:
+      - chore
+      - skip-release
+  categories:
+    - title: 新特性
+      labels:
+        - feat
+        - feature
+        - enhancement
+    - title: 问题修复
+      labels:
+        - fix
+        - bug
+    - title: 文档
+      labels:
+        - docs
+    - title: 其他
+      labels:
+        - "*"
