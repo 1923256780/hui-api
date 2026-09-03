@@ -1,5 +1,5 @@
 // App 是路由表：/login 与 /register 独立页；/console 挂控制台骨架与
-// 九个子页面（M3-wave2 新增个人中心 /console/profile）；
+// 十个子页面（M3-wave3 新增邀请返利 /console/invite）；
 // 未匹配路径一律重定向 /console（未登录时由骨架探针跳回 /login）。
 import { Navigate, Route, Routes } from 'react-router-dom'
 import ConsoleLayout from './components/ConsoleLayout'
@@ -15,6 +15,7 @@ import LogsPage from './pages/Logs'
 import ModelsPage from './pages/Models'
 import SettingsPage from './pages/Settings'
 import ProfilePage from './pages/Profile'
+import InvitePage from './pages/Invite'
 
 export default function App() {
   return (
@@ -28,6 +29,7 @@ export default function App() {
         <Route path="users" element={<UsersPage />} />
         <Route path="redemptions" element={<RedemptionsPage />} />
         <Route path="topup" element={<TopUpPage />} />
+        <Route path="invite" element={<InvitePage />} />
         <Route path="logs" element={<LogsPage />} />
         <Route path="models" element={<ModelsPage />} />
         <Route path="settings" element={<SettingsPage />} />

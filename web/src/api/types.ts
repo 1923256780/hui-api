@@ -128,7 +128,8 @@ export interface UserStats {
 
 // ===== M3-wave2：注册能力发现 / OAuth 身份 / TOTP（docs/05 §5.8-§5.9）=====
 
-// GET /api/setup 能力发现：注册页与登录页据此渲染开关与 OAuth 按钮。
+// GET /api/setup 能力发现：注册页与登录页据此渲染开关与 OAuth 按钮；
+// topup 为在线充值网关开关（M3-wave3），充值页据此渲染在线充值区块。
 export interface SetupData {
   register_enabled: boolean
   email_verification: boolean
@@ -137,6 +138,10 @@ export interface SetupData {
     github: boolean
     linuxdo: boolean
     oidc: boolean
+  }
+  topup?: {
+    epay: boolean
+    stripe: boolean
   }
 }
 
@@ -154,4 +159,42 @@ export interface UserIdentityView {
 export interface TOTPSetupData {
   secret: string
   otpauth_uri: string
+}
+
+// ===== M3-wave3：在线充值订单 / 邀请返利（docs/05 §5.10 订单与回调契约）=====
+
+// POST /api/user/topup/order 响应：order_no 供回跳查单，pay_url 为支付
+// 跳转地址（epay 网关提交页 / Stripe Checkout Session URL），quota 为按
+// 汇率快照换算的到账额度。
+export interface OrderCreateResp {
+  order_no: string
+  pay_url: string
+  quota: number
+}
+
+// GET /api/user/topup/orders 条目：与 model.TopupOrder 序列化字段一致
+//（本人作用域分页；金额为分 amount_cents，rate 为汇率定点快照）。
+export interface TopupOrderView {
+  id: number
+  order_no: string
+  user_id: number
+  gateway: string // epay | stripe
+  amount_cents: number
+  currency: string // CNY | USD
+  quota: number
+  rate: number
+  status: number // 1 待支付 2 已支付 3 失败 4 已过期
+  trade_no: string
+  detail: string
+  paid_time: number
+  created_time: number
+}
+
+// GET /api/user/aff 响应：邀请码（服务端惰性补发）/ 邀请人数 /
+// 累计返利额度 / 返利比例（percent，0 = 返利未启用）。
+export interface AffSummary {
+  aff_code: string
+  invited_count: number
+  aff_history_quota: number
+  rebate_percent: number
 }

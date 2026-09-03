@@ -38,6 +38,14 @@ export const REDEMPTION_STATUS: Record<number, StatusTag> = {
   4: { text: '已过期', color: 'orange' },
 }
 
+// 充值订单状态（topup_orders.status，M3-wave3；2=已支付即额度已入账）。
+export const TOPUP_ORDER_STATUS: Record<number, StatusTag> = {
+  1: { text: '待支付', color: 'orange' },
+  2: { text: '已支付', color: 'green' },
+  3: { text: '失败', color: 'red' },
+  4: { text: '已过期', color: 'default' },
+}
+
 export function statusTag(status: number, map: Record<number, StatusTag>): StatusTag {
   return map[status] ?? { text: `未知(${status})`, color: 'red' }
 }
