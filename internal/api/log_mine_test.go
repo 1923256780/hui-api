@@ -17,7 +17,7 @@ import (
 )
 
 // seedConsumeLog 写入一条指定用户/模型的计费日志并返回
-//（命名避开 user_stats_test.go 既有 seedLog）。
+// （命名避开 user_stats_test.go 既有 seedLog）。
 func seedConsumeLog(t *testing.T, st *store.Store, userID int64, modelName string) model.Log {
 	t.Helper()
 	l := model.Log{
