@@ -36,10 +36,11 @@ func (h *Handler) registerOptionRoutes(g *gin.RouterGroup) {
 //     hooks.*（观测旁路，M2-wave3）；M3-wave1 商业化前缀：smtp.*（邮件）、
 //     register.*（注册）、oauth.*（第三方登录配置）、turnstile.*（人机校验）、
 //     epay.* 与 stripe.*（支付网关，wave2 对接）、aff.*（邀请返利）、topup.*（充值）；
+//     M4 评审新增：auth.*（认证限频，auth.login_ip_limit）。
 //   - 行业通用计费/限流精确键（与 gateway/billing 包常量同源）。
 func allowedOptionKey(key string) bool {
 	for _, p := range []string{
-		"relay.", "billing_setting.", "hooks.",
+		"relay.", "billing_setting.", "hooks.", "auth.",
 		"smtp.", "register.", "oauth.", "turnstile.", "epay.", "stripe.", "aff.", "topup.",
 	} {
 		if strings.HasPrefix(key, p) {

@@ -557,10 +557,13 @@ func TestResetPasswordFlow(t *testing.T) {
 
 // ---- Login IP 限频 ----
 
-// TestLoginIPLimit 登录 IP 限频：1h 窗口 10 次尝试后 429（含失败计数）。
+// TestLoginIPLimit 登录 IP 限频（M4 评审 M-B 失败记账语义）：连续失败达上限
+// （测试内经 auth.login_ip_limit 配为 5）后 429 且带 Retry-After；成功登录
+// 不消耗预算见 TestLoginSuccessNoBudget，二段式不双耗见 TestLoginTwoFactorBudget。
 func TestLoginIPLimit(t *testing.T) {
-	r, _, _ := newTestAPI(t)
-	for i := 0; i < loginIPLimitMax; i++ {
+	r, _, h := newTestAPI(t)
+	setOpts(t, h, map[string]string{OptionKeyAuthLoginIPLimit: "5"})
+	for i := 0; i < 5; i++ {
 		w := doJSON(t, r, http.MethodPost, "/api/user/login", "",
 			map[string]string{"username": "nobody", "password": "wrong"})
 		if w.Code != http.StatusUnauthorized {
@@ -672,6 +675,7 @@ func TestOptionMaskingAndSentinel(t *testing.T) {
 			"epay.partner_id":             "p1",
 			"oauth.github_client_id":      "gh1",
 			"turnstile.secret_key":        "ts",
+			"auth.login_ip_limit":         "30",
 		},
 	})
 	if w.Code != http.StatusOK {

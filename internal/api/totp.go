@@ -15,6 +15,8 @@ package api
 
 import (
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/pquerna/otp/totp"
@@ -24,6 +26,28 @@ import (
 
 // totpIssuer 是 otpauth URI 中的 issuer 标识（认证器 App 列表展示名）。
 const totpIssuer = "Hui Api"
+
+// TOTP enable/disable 失败预算（M4 评审 M-D）：以 totp|<uid> 维度限频，
+// enable/disable 共享预算，错码才记账（失败记账语义，正确码不受历史失败
+// 影响）——防会话被劫持后无限爆破验码关闭 2FA。
+const (
+	totpFailWindow = time.Hour
+	totpFailLimit  = 10
+)
+
+// totpBudgetGuard 验码类 TOTP 端点共用守卫：预检失败预算（超限 429）；
+// 返回记账函数供错码路径调用（同 key，账自本端点累积）、清零函数供验证
+// 通过后调用（成功即身份成立，Reset 该 uid 历史失败，后续从零计数）。
+func (h *Handler) totpBudgetGuard(c *gin.Context, uid int64) (ok bool, tallyFail func(), onSuccess func()) {
+	key := "totp|" + strconv.FormatInt(uid, 10)
+	if allow, retry := h.authRL.AllowFailures(key, totpFailWindow, totpFailLimit); !allow {
+		writeRetryAfter(c, retry)
+		return false, nil, nil
+	}
+	return true,
+		func() { h.authRL.TallyFail(key, totpFailWindow) },
+		func() { h.authRL.Reset(key) }
+}
 
 // TOTPSetup 生成本用户 TOTP 密钥（登录态）：已启用时拒绝（防覆盖在用密钥）；
 // 生成的密钥落库但 enabled 保持 false，需 enable 验码后生效。
@@ -61,6 +85,8 @@ func (h *Handler) TOTPSetup(c *gin.Context) {
 
 // TOTPEnable 启用两步验证（登录态）：凭 setup 落库的密钥验码，通过后
 // enabled=true。未 setup / 已启用 / 错码分别拒绝（错码不消费密钥可重试）。
+// M4 评审 M-D：错码受 totp|<uid> 失败预算约束（缺码在预检前拦截不算尝试）；
+// 验证通过即清零历史失败（成功清账，后续从零计数）。
 func (h *Handler) TOTPEnable(c *gin.Context) {
 	u := currentUser(c)
 	if u == nil {
@@ -72,6 +98,10 @@ func (h *Handler) TOTPEnable(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Code == "" {
 		writeErr(c, http.StatusBadRequest, "invalid_request", "缺少验证码")
+		return
+	}
+	ok, tallyFail, onSuccess := h.totpBudgetGuard(c, u.ID)
+	if !ok {
 		return
 	}
 	var row model.User
@@ -88,9 +118,11 @@ func (h *Handler) TOTPEnable(c *gin.Context) {
 		return
 	}
 	if !totp.Validate(req.Code, row.TOTPSecret) {
+		tallyFail()
 		writeErr(c, http.StatusBadRequest, "totp_code_invalid", "验证码不正确")
 		return
 	}
+	onSuccess() // 验证通过即身份成立，清零该 uid 历史失败预算。
 	if err := h.st.Write.Model(&model.User{}).Where("id = ?", row.ID).
 		Update("totp_enabled", true).Error; err != nil {
 		writeErr(c, http.StatusInternalServerError, "totp_enable_failed", "启用两步验证失败")
@@ -101,7 +133,9 @@ func (h *Handler) TOTPEnable(c *gin.Context) {
 
 // TOTPDisable 禁用两步验证（登录态）：验码通过后双列清空，即 secret 置空串、
 // enabled 置 false，回到未绑定状态；此后登录免验码。禁用必须凭当前有效
-// 验证码——防止会话被劫持后直接关闭 2FA 绕过二次验证。
+// 验证码——防止会话被劫持后直接关闭 2FA 绕过二次验证。M4 评审 M-D：错码
+// 受 totp|<uid> 失败预算约束（enable/disable 共享），劫持会话无法无限爆破；
+// 验证通过即清零历史失败（成功清账，后续从零计数）。
 func (h *Handler) TOTPDisable(c *gin.Context) {
 	u := currentUser(c)
 	if u == nil {
@@ -115,6 +149,10 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 		writeErr(c, http.StatusBadRequest, "invalid_request", "缺少验证码")
 		return
 	}
+	ok, tallyFail, onSuccess := h.totpBudgetGuard(c, u.ID)
+	if !ok {
+		return
+	}
 	var row model.User
 	if err := h.st.Read.First(&row, u.ID).Error; err != nil {
 		writeErr(c, http.StatusNotFound, "not_found", "用户不存在")
@@ -125,9 +163,11 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 		return
 	}
 	if !totp.Validate(req.Code, row.TOTPSecret) {
+		tallyFail()
 		writeErr(c, http.StatusBadRequest, "totp_code_invalid", "验证码不正确")
 		return
 	}
+	onSuccess() // 验证通过即身份成立，清零该 uid 历史失败预算。
 	if err := h.st.Write.Model(&model.User{}).Where("id = ?", row.ID).
 		Updates(map[string]any{"totp_secret": "", "totp_enabled": false}).Error; err != nil {
 		writeErr(c, http.StatusInternalServerError, "totp_disable_failed", "禁用两步验证失败")

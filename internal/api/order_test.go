@@ -754,10 +754,8 @@ func TestStripeWebhookRevivesExpiredOrder(t *testing.T) {
 // query/form 混合（合并取参、GET 优先）均应验签通过照常入账。
 func TestEpayNotifyPostForm(t *testing.T) {
 	r, st, h := newTestAPI(t)
-	// 生产路由（handler.go，禁碰的他同事文件）仅挂 GET；本测试内补挂 POST
-	// 直测 handler 的双形态取参。POST form notify 的生产放行需路由侧配合
-	//（g.POST 同路径），已单独上报，不在本批次越界处理。
-	r.POST("/api/pay/epay/notify", h.EpayNotify)
+	// POST form 形态经生产路由直测（handler.go 已双挂 GET/POST，M4 评审
+	// 路由侧配合落地，移除原测试内补挂）。
 	u := seedUser(t, st, "alice", "pw-alice", 1)
 	enableEpay(t, h)
 	o := seedTopupOrder(t, st, u.ID, "epay", "CNY", 1000, 694444, 720, model.TopupOrderPending)

@@ -3,7 +3,8 @@
 //   - GET  /api/setup：注册能力发现（注册/邮箱验证/人机校验/OAuth 可用性）；
 //   - POST /api/user/register：开放注册（开关、IP 限频、人机校验、邮箱验证码、
 //     查重、bcrypt、事务建户与邀请奖励双向入账）；
-//   - POST /api/verification_code：发送邮箱验证码（SMTP 配置门控 + 限频）；
+//   - POST /api/verification_code：发送邮箱验证码（SMTP 配置门控 + sendcode|IP
+//     限频 + Turnstile 门控，M4 评审 M-C）；
 //   - POST /api/user/reset_password：验证码重置口令（验码一次性消费 + auth_version 递增）。
 //
 // 鉴权层级：四个端点全部公开（无需会话），安全边界由开关、限频与验证码承担。
@@ -30,13 +31,17 @@ import (
 	"github.com/1923256780/hui-api/internal/verification"
 )
 
-// 运行轨配置键（options 白名单 register.*/aff.* 前缀，docs/05 键表）。
+// 运行轨配置键（options 白名单 register.*/aff.*/auth.* 前缀，docs/05 键表）。
 const (
 	OptionKeyRegisterEnabled           = "register.enabled"
 	OptionKeyRegisterEmailVerification = "register.email_verification"
 	OptionKeyRegisterQuotaForNewUser   = "register.quota_for_new_user"
 	OptionKeyAffRewardInviter          = "aff.register_reward_inviter"
 	OptionKeyAffRewardInvitee          = "aff.register_reward_invitee"
+	// OptionKeyAuthLoginIPLimit 登录 IP 限频上限（1h 窗口，失败记账维度）。
+	// M4 评审修复提为可配（NAT 共出口场景可用性回归）：成功登录不消耗预算后
+	// 连续失败仍受限，缺省从 10 提高。非法值（≤0/非数字）回退缺省。
+	OptionKeyAuthLoginIPLimit = "auth.login_ip_limit"
 )
 
 // 注册/找回的验证码 purpose 枚举（verification.Store 维度隔离键）。
@@ -45,12 +50,16 @@ const (
 	purposeReset    = "reset"
 )
 
-// IP 限频参数（M3-wave1 固定值，不入 options）。
+// IP 限频参数（M4 评审修订：登录上限可配 auth.login_ip_limit，缺省 30；
+// 发码 IP 预算为 M-C 修复新增，放行即记账——邮件轰炸向量封堵）。
 const (
 	registerIPLimitWindow = time.Hour
 	registerIPLimitMax    = 5
 	loginIPLimitWindow    = time.Hour
-	loginIPLimitMax       = 10
+	// defaultLoginIPLimitMax 是 auth.login_ip_limit 未配置/非法时的缺省上限。
+	defaultLoginIPLimitMax = 30
+	sendcodeIPLimitWindow  = time.Hour
+	sendcodeIPLimitMax     = 10
 )
 
 // FeatureFlags 返回公开特性开关（GET /api/setup 与 /api/status features 块共用）。
@@ -248,12 +257,19 @@ func (h *Handler) RegisterUser(c *gin.Context) {
 	})
 }
 
-// SendVerificationCode 发送邮箱验证码（公开）。SMTP 未启用 503；同邮箱
-// 60s 限频 / 每日上限由 verification.Store 承担（429）。验证码不回显不落日志。
+// SendVerificationCode 发送邮箱验证码（公开）。sendcode|IP 独立限频（1h×10，
+// 放行即记账——每次成功发码都有真实出站成本，M-C 邮件轰炸封堵）；SMTP 未启用
+// 503；Turnstile 启用时与注册同规则强制校验（未启用不校验）；同邮箱 60s 限频 /
+// 每日上限由 verification.Store 承担（429）。验证码不回显不落日志。
 func (h *Handler) SendVerificationCode(c *gin.Context) {
+	if ok, retry := h.authRL.AllowRequest("sendcode|"+c.ClientIP(), sendcodeIPLimitWindow, sendcodeIPLimitMax, 0); !ok {
+		writeRetryAfter(c, retry)
+		return
+	}
 	var req struct {
-		Email   string `json:"email"`
-		Purpose string `json:"purpose"`
+		Email          string `json:"email"`
+		Purpose        string `json:"purpose"`
+		TurnstileToken string `json:"turnstile_token"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeErr(c, http.StatusBadRequest, "invalid_request", err.Error())
@@ -272,6 +288,16 @@ func (h *Handler) SendVerificationCode(c *gin.Context) {
 	if !h.rt.GetBool(mailer.KeyEnabled, false) {
 		writeErr(c, http.StatusServiceUnavailable, "smtp_not_configured", "邮件服务未配置")
 		return
+	}
+	// 人机校验：启用即与注册同规则强制（M-C：发码端点原先不校验，开放注册页
+	// 与找回密码页在 turnstile.enabled=true 时同样渲染 widget 并回传 token）。
+	if h.rt.GetBool(OptionKeyTurnstileEnabled, false) {
+		secret, _ := h.rt.Get(OptionKeyTurnstileSecretKey)
+		ok, err := h.verifier.Verify(c.Request.Context(), secret, req.TurnstileToken, c.ClientIP())
+		if err != nil || !ok {
+			writeErr(c, http.StatusBadRequest, "turnstile_failed", "人机校验未通过")
+			return
+		}
 	}
 	if h.vstore == nil {
 		writeErr(c, http.StatusInternalServerError, "verification_unavailable", "验证码服务不可用")

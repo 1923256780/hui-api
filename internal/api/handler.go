@@ -114,17 +114,19 @@ func paramID(c *gin.Context) int64 {
 // 端点 root 权限，由各域文件在 registerManaged 中挂载。
 func (h *Handler) Register(r gin.IRouter) {
 	g := r.Group("/api")
-	g.POST("/user/login", h.Login)
+	// 登录两端点挂 loginRateLimit 失败记账中间件（M4 评审 M-B）。
+	g.POST("/user/login", h.loginRateLimit(), h.Login)
 	g.POST("/user/logout", h.Logout)
 	// 公开注册体系（M3-wave1，docs/05）。
 	g.GET("/setup", h.GetSetup)
 	g.POST("/user/register", h.RegisterUser)
 	g.POST("/verification_code", h.SendVerificationCode)
 	g.POST("/user/reset_password", h.ResetPassword)
-	// OAuth 登录（公开组）与两步验证第二段（凭 stage1 会话，M3-wave2）。
+	// OAuth 登录（公开组）与两步验证第二段（凭 stage1 会话，M3-wave2；2FA
+	// 第二段与密码登录共用 login|IP 失败预算，M4 评审 M-B）。
 	g.GET("/oauth/:provider", h.OAuthAuthorize)
 	g.GET("/oauth/:provider/callback", h.OAuthCallback)
-	g.POST("/user/login/2fa", h.LoginTwoFactor)
+	g.POST("/user/login/2fa", h.loginRateLimit(), h.LoginTwoFactor)
 	// OAuth 绑定模式与身份列表/解绑（登录态，M3-wave2，docs/05 §5.8）。
 	g.GET("/oauth/:provider/bind", h.RequireAuth, h.OAuthBindAuthorize)
 	g.GET("/user/identities", h.RequireAuth, h.ListMyIdentities)
@@ -152,6 +154,9 @@ func (h *Handler) Register(r gin.IRouter) {
 	g.GET("/user/topup/orders", h.RequireAuth, h.ListMyTopupOrders)
 	g.GET("/user/aff", h.RequireAuth, h.GetMyAff)
 	g.GET("/pay/epay/notify", h.EpayNotify)
+	// POST form 形态回调（M4 支付批次评审补挂：order.go EpayNotify 已兼容
+	// PostForm，路由同 handler 双挂 GET/POST，公开组不变）。
+	g.POST("/pay/epay/notify", h.EpayNotify)
 	g.GET("/pay/epay/return", h.EpayReturn)
 	g.POST("/pay/stripe/webhook", h.StripeWebhook)
 	h.registerManaged(g.Group("", h.RequireRoot))
@@ -167,16 +172,46 @@ func (h *Handler) registerManaged(g *gin.RouterGroup) {
 	h.registerOptionRoutes(g)
 }
 
-// Login 用户名密码登录：IP 限频（1h×10）→ 校验 users 表（bcrypt），通过后
-// 签发签名会话 cookie。用户名不存在与密码错误返回同一错误（不泄露账号存在性）。
+// loginIPLimitMax 读取登录 IP 限频上限（auth.login_ip_limit，1h 窗口；M4 评审
+// M-B 提为可配）。非法值（≤0 或非数字）回退缺省 30。
+func (h *Handler) loginIPLimitMax() int {
+	if n := int(h.rt.GetInt64(OptionKeyAuthLoginIPLimit, defaultLoginIPLimitMax)); n > 0 {
+		return n
+	}
+	return defaultLoginIPLimitMax
+}
+
+// loginRateLimit 登录/二段式登录共用的 IP 限频中间件（M4 评审 M-B：失败记账
+// 语义）。预检失败预算（AllowFailures，窗口内连续失败达上限即 429+Retry-After）；
+// 放行后按响应状态记账——状态 ≥400 记一次失败（TallyFail），2xx/3xx 成功路径
+// 零消耗。修复三个问题：① NAT 共出口 IP 的正常成功登录不再被历史成功计数拖累；
+// ② 2FA 二段式与密码段共用预算时完整登录不再耗 2 份（两段成功响应均不记账）；
+// ③ 上限提为可配 auth.login_ip_limit（缺省 30，爆破防护保持：连续失败仍受限）。
+// 预检发生在参数解析前（先 429 后 400，与原放行即记账的拒绝顺序一致）。
+func (h *Handler) loginRateLimit() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := "login|" + c.ClientIP()
+		max := h.loginIPLimitMax()
+		if ok, retry := h.authRL.AllowFailures(key, loginIPLimitWindow, max); !ok {
+			writeRetryAfter(c, retry)
+			c.Abort()
+			return
+		}
+		c.Next()
+		if c.Writer.Status() >= http.StatusBadRequest {
+			h.authRL.TallyFail(key, loginIPLimitWindow)
+		}
+	}
+}
+
+// Login 用户名密码登录：IP 限频（失败记账，见 loginRateLimit）→ 校验 users 表
+// （bcrypt），通过后签发签名会话 cookie。用户名不存在与密码错误返回同一错误
+// （不泄露账号存在性）。
 // M3-wave2 二段式登录：已启用两步验证的用户签 Stage=1 短 TTL 会话并返回
 // {require_2fa:true}，前端凭该会话调 POST /api/user/login/2fa 完成第二段
 // （TOTPEnabled 且密钥为空的异常态按未启用处理，避免用户被锁死）。
+// M4 评审 M-B：限频预检移入 loginRateLimit 中间件（成功登录零消耗）。
 func (h *Handler) Login(c *gin.Context) {
-	if ok, retry := h.authRL.AllowRequest("login|"+c.ClientIP(), loginIPLimitWindow, loginIPLimitMax, 0); !ok {
-		writeRetryAfter(c, retry)
-		return
-	}
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -224,14 +259,11 @@ func (h *Handler) Logout(c *gin.Context) {
 
 // LoginTwoFactor 两步验证第二段（公开，M3-wave2）：凭 Stage=1 短 TTL 会话
 // 验 TOTP 码，通过后重签 Stage=0 完整会话。IP 限频与密码登录共用 login|IP
-// 预算（防绕过密码段直接爆破验证码；密码错误 + 多次验码失败会累积触发 429）。
-// 阶段/用户校验：会话必须为 stageTOTP 且 auth_version 与库一致（改密后
-// stage1 会话同样失效）。
+// 预算（防绕过密码段直接爆破验证码），语义见 loginRateLimit（M4 评审 M-B：
+// 失败记账——错码才消耗预算，完整成功登录两段响应均 2xx 净消耗 0，一次
+// 登录不再双耗）。阶段/用户校验：会话必须为 stageTOTP 且 auth_version 与库
+// 一致（改密后 stage1 会话同样失效）。
 func (h *Handler) LoginTwoFactor(c *gin.Context) {
-	if ok, retry := h.authRL.AllowRequest("login|"+c.ClientIP(), loginIPLimitWindow, loginIPLimitMax, 0); !ok {
-		writeRetryAfter(c, retry)
-		return
-	}
 	uid, authv, stage, ok := h.sess.Verify(c)
 	if !ok {
 		writeErr(c, http.StatusUnauthorized, "unauthorized", "登录状态无效或已过期")
