@@ -67,6 +67,9 @@ func (h *Handler) Register(r gin.IRouter) {
 	// 登录用户自服务端点（M2-wave3）：仅要求登录，不要求 root（docs/05）。
 	g.POST("/user/topup", h.RequireAuth, h.TopupRedeem)
 	g.GET("/user/self", h.RequireAuth, h.GetSelf)
+	// 自服务统计（M2 收官 Task #19）：普通用户看板数据源，服务端按会话用户
+	// 聚合今日 logs；root 看板仍走管理面 /api/log 自行聚合。
+	g.GET("/user/stats", h.RequireAuth, h.GetUserStats)
 	g.POST("/token/:id/assign", h.RequireAuth, h.AssignTokenQuota)
 	// 名下令牌列表（M2 浏览器验收缺陷修复）：登录态 + 所有权作用域，供
 	// topup 页等普通用户视图替代管理列表 GET /api/token（root 专属）。
