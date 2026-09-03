@@ -1,8 +1,9 @@
 // hui-api 程序入口：装配配置双轨、存储层、hook 旁路与路由，并实现优雅停机。
 //
 // 启动顺序（docs/01）：加载启动轨配置 → 打开存储层并迁移 → 加载运行轨配置 →
-// 启动 hook 旁路 → 挂路由 → 监听信号。停机顺序：HTTP 优雅关闭（带超时）→
-// hook 队列排空 → 验证码清扫器停止 → 关闭连接池。
+// 启动 hook 旁路 → 挂路由 → 启动后台任务池（M3-wave4：验证码清扫 + 订单超时
+// 关单）→ 监听信号。停机顺序：HTTP 优雅关闭（带超时）→ 后台任务池 Stop（等待
+// 在途任务退出）→ hook 队列排空 → 关闭连接池。
 package main
 
 import (
@@ -29,6 +30,7 @@ import (
 	"github.com/1923256780/hui-api/internal/relay/anthropic"
 	"github.com/1923256780/hui-api/internal/relay/openai"
 	"github.com/1923256780/hui-api/internal/store"
+	"github.com/1923256780/hui-api/internal/worker"
 	webui "github.com/1923256780/hui-api/web"
 )
 
@@ -42,8 +44,13 @@ var (
 // httpShutdownTimeout 优雅停机窗口：等待在途请求完成的上限。
 const httpShutdownTimeout = 10 * time.Second
 
-// verificationSweepInterval 验证码过期清扫周期（M3-wave1）。
-const verificationSweepInterval = time.Minute
+// 后台任务周期（M3-wave4 收编 worker 池统一管理）。
+const (
+	// verificationSweepInterval 验证码过期清扫周期（M3-wave1 引入，M3-wave4 起由 worker 池承载）。
+	verificationSweepInterval = time.Minute
+	// topupOrderExpireInterval 充值订单超时关单扫描周期。
+	topupOrderExpireInterval = 5 * time.Minute
+)
 
 func main() {
 	showVersion := flag.Bool("version", false, "打印版本信息后退出")
@@ -129,12 +136,12 @@ func run(addrOverride, configPath string) error {
 	defer dispatcher.Stop(3 * time.Second)
 
 	// 5. 路由 + 前端 SPA。
-	engine, gw, stopSweeper, err := newRouter(st, rt, schemaVersion, cfg.SessionSecret)
+	engine, gw, stopWorkers, err := newRouter(st, rt, schemaVersion, cfg.SessionSecret)
 	if err != nil {
 		return fmt.Errorf("组装路由: %w", err)
 	}
 	defer gw.Close()        // 优雅停机排空异步请求日志（先行于存储层关闭）
-	defer stopSweeper()     // 停止验证码过期清扫（M3-wave1）
+	defer stopWorkers()     // 停止后台任务池（验证码清扫 + 订单超时关单，M3-wave4）
 	gw.SetHooks(dispatcher) // 观测旁路挂接（M2-wave3）
 	engine.NoRoute(gin.WrapH(webui.Handler()))
 
@@ -169,7 +176,8 @@ func run(addrOverride, configPath string) error {
 // newRouter 组装路由：/health 健康检查、/api/status 状态端点（含 features 特性
 // 开关块）、转发面 /v1/* 与管理面 /api（root 引导 + 会话 + CRUD + M3-wave1 公开
 // 注册体系）。计费引擎在此构造（内置价单启动校验，schema 非法时 fail-fast 拒绝
-// 启动）。返回 Gateway（停机排空异步日志）与验证码清扫器停止函数。
+// 启动）。返回 Gateway（停机排空异步日志）与后台任务池停止函数（M3-wave4：
+// 验证码过期清扫 1min + 充值订单超时关单 5min，统一 panic recover）。
 // sessionSecret 为会话 cookie 签名密钥（run() 已保证非空）。
 func newRouter(st *store.Store, rt *config.Runtime, schemaVersion int64, sessionSecret string) (*gin.Engine, *gateway.Gateway, func(), error) {
 	gin.SetMode(gin.ReleaseMode)
@@ -210,16 +218,36 @@ func newRouter(st *store.Store, rt *config.Runtime, schemaVersion int64, session
 	v1.GET("/models", gw.HandleModels)
 
 	// 管理面（M2-wave1，docs/05）：先保证 root 存在（幂等），再挂会话与 /api CRUD。
-	// M3-wave1：Handler 内置注册体系依赖（限频/siteverify/mailer/验证码存储），
-	// 启动验证码过期清扫后台任务，停机时停止。
+	// M3-wave1：Handler 内置注册体系依赖（限频/siteverify/mailer/验证码存储）；
+	// M3-wave4：验证码清扫与订单超时关单统一收编 worker 池（panic 隔离、
+	// 随 graceful shutdown 一起 Stop）。
 	if _, err := api.EnsureRootUser(st); err != nil {
 		return nil, nil, nil, fmt.Errorf("引导 root 用户: %w", err)
 	}
 	sess := api.NewSessionManager([]byte(sessionSecret))
 	ah := api.New(st, rt, gw, sess)
-	stopSweeper := ah.StartVerificationSweeper(verificationSweepInterval)
 	ah.Register(r)
-	return r, gw, stopSweeper, nil
+
+	// 后台任务池（M3-wave4）：验证码过期清扫（每 1min，调 verification.Store
+	// Sweep）+ 充值订单超时关单（每 5min，pending 超阈值置 expired；阈值
+	// topup.order_timeout_minutes 热生效，缺省 15min——docs/05 §5.10 注记）。
+	workers := worker.NewPool()
+	workers.Start(
+		worker.Task{
+			Name:     "verification-sweeper",
+			Interval: verificationSweepInterval,
+			Run:      func() { ah.VerificationStore().Sweep() },
+		},
+		worker.Task{
+			Name:     "topup-order-expirer",
+			Interval: topupOrderExpireInterval,
+			Run: func() {
+				timeout := time.Duration(rt.GetInt64(worker.OptionKeyTopupOrderTimeoutMinutes, 0)) * time.Minute
+				worker.ExpireStaleTopupOrders(st, timeout)
+			},
+		},
+	)
+	return r, gw, workers.Stop, nil
 }
 
 // randomSecret 生成 32 字节随机密钥的 hex 编码（SESSION_SECRET 缺省兜底）。
