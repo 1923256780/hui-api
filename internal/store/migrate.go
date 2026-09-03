@@ -17,8 +17,10 @@ import (
 // 版本历史：
 //
 //	1（M1-wave1）六表基线；
-//	2（M1-wave2）channels 新增 param_override 列（0002_channel_param_override.sql）。
-const SchemaVersion int64 = 2
+//	2（M1-wave2）channels 新增 param_override 列（0002_channel_param_override.sql）；
+//	3（M2-wave1）tokens 新增 group/model_limits/allow_ips，users 新增 group/auth_version
+//	  （0003_m2_token_user_columns.sql）。
+const SchemaVersion int64 = 3
 
 // OptionKeySchemaVersion 是 options 表中记录 schema 版本的键。
 const OptionKeySchemaVersion = "schema_version"

@@ -72,6 +72,9 @@ type Token struct {
 	BudgetResetAt  int64  `gorm:"column:budget_reset_at;not null;default:0" json:"budget_reset_at"` // 下次预算重置时间（unix 秒）
 	TPMRPM         string `gorm:"column:tpm_rpm;size:128;not null;default:''" json:"tpm_rpm"`       // JSON: {"tpm":..,"rpm":..}
 	Tags           string `gorm:"column:tags;size:512;not null;default:''" json:"tags"`             // JSON 数组，如 ["team-a"]
+	Group          string `gorm:"column:group;size:64;not null;default:'default'" json:"group"`     // 令牌分组：GroupRatio 组倍率与分组级限流的归属组（M2-wave1）
+	ModelLimits    string `gorm:"column:model_limits;size:512;not null;default:''" json:"model_limits"` // 模型白名单（逗号分隔；空=不限）
+	AllowIPs       string `gorm:"column:allow_ips;size:512;not null;default:''" json:"allow_ips"`   // IP 白名单（逗号分隔 IP/CIDR；空=不限）
 	ExpiredTime    int64  `gorm:"column:expired_time;not null;default:-1" json:"expired_time"`
 	CreatedTime    int64  `gorm:"column:created_time;not null;default:0" json:"created_time"`
 	AccessedTime   int64  `gorm:"column:accessed_time;not null;default:0" json:"accessed_time"`
@@ -91,6 +94,8 @@ type User struct {
 	Quota         int64  `gorm:"column:quota;not null;default:0" json:"quota"`
 	UsedQuota     int64  `gorm:"column:used_quota;not null;default:0" json:"used_quota"`
 	Email         string `gorm:"column:email;size:128;not null;default:'';index" json:"email"`
+	Group         string `gorm:"column:group;size:64;not null;default:'default'" json:"group"` // 用户默认分组（管理面创建令牌的缺省归属组，M2-wave1）
+	AuthVersion   int64  `gorm:"column:auth_version;not null;default:0" json:"-"`              // 会话版本：递增使既有登录会话全部失效（改密时递增，M2-wave1）
 	CreatedTime   int64  `gorm:"column:created_time;not null;default:0" json:"created_time"`
 	LastLoginTime int64  `gorm:"column:last_login_time;not null;default:0" json:"last_login_time"`
 }
