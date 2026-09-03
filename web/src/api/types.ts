@@ -103,3 +103,24 @@ export interface OptionListData {
   items: OptionRow[]
   version: number
 }
+
+// /api/user/stats 自服务统计（M2 收官 Task #19）：当前登录用户今日聚合，
+// 服务端 SQL 聚合 logs 表（作用域恒为会话用户，docs/05 第五节）。
+export interface UserStatsModelRow {
+  model_name: string
+  requests: number
+  prompt_tokens: number
+  completion_tokens: number
+  quota: number
+}
+
+export interface UserStats {
+  start_timestamp: number
+  end_timestamp: number
+  requests: number
+  prompt_tokens: number
+  completion_tokens: number
+  tokens: number // prompt + completion 汇总
+  quota: number
+  models: UserStatsModelRow[] // 按 quota 降序，上限 100 行
+}
