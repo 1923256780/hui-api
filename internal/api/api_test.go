@@ -138,7 +138,7 @@ func TestSessionRoundTrip(t *testing.T) {
 	req.Header.Set("Cookie", pair)
 	c2, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c2.Request = req
-	uid, authv, ok := sess.Verify(c2)
+	uid, authv, _, ok := sess.Verify(c2)
 	if !ok || uid != 42 || authv != 3 {
 		t.Fatalf("会话应有效且 uid/authv 一致，实际 ok=%v uid=%d authv=%d", ok, uid, authv)
 	}
@@ -146,8 +146,8 @@ func TestSessionRoundTrip(t *testing.T) {
 	req3 := httptest.NewRequest(http.MethodGet, "/", nil)
 	c3, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c3.Request = req3
-	if _, _, ok := sess.Verify(c3); ok {
-		t.Fatal("无 cookie 应无效")
+	if _, _, _, ok := sess.Verify(c3); ok {
+		t.Fatal("旧 cookie 应无效")
 	}
 }
 
@@ -178,7 +178,7 @@ func TestSessionTamperRejected(t *testing.T) {
 		req.Header.Set("Cookie", SessionCookieName+"="+mutated)
 		c2, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c2.Request = req
-		if _, _, ok := sess.Verify(c2); ok {
+		if _, _, _, ok := sess.Verify(c2); ok {
 			t.Fatalf("篡改 %s 后应无效", name)
 		}
 	}
@@ -199,7 +199,7 @@ func TestSessionExpiredRejected(t *testing.T) {
 	req.Header.Set("Cookie", pair)
 	c2, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c2.Request = req
-	if _, _, ok := sess.Verify(c2); !ok {
+	if _, _, _, ok := sess.Verify(c2); !ok {
 		t.Fatal("TTL 内会话应有效")
 	}
 
@@ -208,8 +208,40 @@ func TestSessionExpiredRejected(t *testing.T) {
 	req2.Header.Set("Cookie", pair)
 	c3, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c3.Request = req2
-	if _, _, ok := sess.Verify(c3); ok {
+	if _, _, _, ok := sess.Verify(c3); ok {
 		t.Fatal("超过 TTL 后会话应过期")
+	}
+}
+
+// TestSessionStageTwoFactor 二段式登录会话语义（M3-wave2）：IssueStage 签发
+// Stage=1 会话可校验且回读 stage=1；Issue 默认签发完整会话 stage=0。
+func TestSessionStageTwoFactor(t *testing.T) {
+	sess := NewSessionManager([]byte("test-secret"))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	sess.Issue(c, 7, 2)
+	pair := strings.Split(w.Header().Get("Set-Cookie"), ";")[0]
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Cookie", pair)
+	c2, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c2.Request = req
+	uid, _, stage, ok := sess.Verify(c2)
+	if !ok || uid != 7 || stage != stageFull {
+		t.Fatalf("默认签发应为完整会话，实际 uid=%d stage=%d ok=%v", uid, stage, ok)
+	}
+
+	w2 := httptest.NewRecorder()
+	c3, _ := gin.CreateTestContext(w2)
+	sess.IssueStage(c3, 7, 2, stageTOTP, totpStageTTL)
+	pair2 := strings.Split(w2.Header().Get("Set-Cookie"), ";")[0]
+	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	req2.Header.Set("Cookie", pair2)
+	c4, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c4.Request = req2
+	_, _, stage2, ok2 := sess.Verify(c4)
+	if !ok2 || stage2 != stageTOTP {
+		t.Fatalf("stage1 会话应回读 stage=%d，实际 ok=%v", stageTOTP, ok2)
 	}
 }
 

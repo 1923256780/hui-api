@@ -1,6 +1,8 @@
 // handler.go 是管理面 API 的路由注册与登录/登出端点（M2-wave1，docs/05）。
 // 管理 CRUD（渠道/令牌/用户/兑换码/日志/配置）在 chunk 中按域拆分文件挂载。
-// M3-wave1 新增公开注册体系路由（register.go）与登录 IP 限频。
+// M3-wave1 新增公开注册体系路由（register.go）与登录 IP 限频；M3-wave2 新增
+// 二段式登录（Login + /api/user/login/2fa）与 OAuth/TOTP/个人中心路由
+// （oauth.go/totp.go/profile.go）。
 package api
 
 import (
@@ -31,9 +33,18 @@ type Handler struct {
 	verifier TurnstileVerifier   // 人机校验（siteverify，5s 超时）
 	mailer   mailer.Mailer       // SMTP 邮件发送（smtp.enabled 门控）
 	vstore   *verification.Store // 邮箱验证码存储（email+purpose 维度）
+
+	// M3-wave2 OAuth 依赖（New 构造默认真实端点；测试可替换字段注入
+	// httptest 假 provider）：oauthHTTP 为 token/userinfo/发现请求出站客户端，
+	// GitHub 三端点与 LinuxDO issuer 常量默认值仅测试覆盖用。
+	oauthHTTP               *http.Client
+	oauthGithubAuthorizeURL string
+	oauthGithubTokenURL     string
+	oauthGithubUserinfoURL  string
+	oauthLinuxDOIssuer      string
 }
 
-// New 构造管理面处理器（含 M3-wave1 注册体系默认依赖）。
+// New 构造管理面处理器（含 M3-wave1 注册体系与 M3-wave2 OAuth 默认依赖）。
 func New(st *store.Store, rt *config.Runtime, gw *gateway.Gateway, sess *SessionManager) *Handler {
 	return &Handler{
 		st:       st,
@@ -44,6 +55,12 @@ func New(st *store.Store, rt *config.Runtime, gw *gateway.Gateway, sess *Session
 		verifier: newTurnstileVerifier(),
 		mailer:   mailer.New(func(key string) (string, bool) { return rt.Get(key) }),
 		vstore:   verification.New(nil),
+
+		oauthHTTP:               &http.Client{Timeout: oauthHTTPTimeout},
+		oauthGithubAuthorizeURL: "https://github.com/login/oauth/authorize",
+		oauthGithubTokenURL:     "https://github.com/login/oauth/access_token",
+		oauthGithubUserinfoURL:  "https://api.github.com/user",
+		oauthLinuxDOIssuer:      "https://connect.linux.do",
 	}
 }
 
@@ -95,6 +112,21 @@ func (h *Handler) Register(r gin.IRouter) {
 	g.POST("/user/register", h.RegisterUser)
 	g.POST("/verification_code", h.SendVerificationCode)
 	g.POST("/user/reset_password", h.ResetPassword)
+	// OAuth 登录（公开组）与两步验证第二段（凭 stage1 会话，M3-wave2）。
+	g.GET("/oauth/:provider", h.OAuthAuthorize)
+	g.GET("/oauth/:provider/callback", h.OAuthCallback)
+	g.POST("/user/login/2fa", h.LoginTwoFactor)
+	// OAuth 绑定模式与身份列表/解绑（登录态，M3-wave2，docs/05 §5.8）。
+	g.GET("/oauth/:provider/bind", h.RequireAuth, h.OAuthBindAuthorize)
+	g.GET("/user/identities", h.RequireAuth, h.ListMyIdentities)
+	g.DELETE("/user/identities/:id", h.RequireAuth, h.DeleteMyIdentity)
+	// 两步验证 TOTP 三端点（登录态，M3-wave2，docs/05 §5.9）。
+	g.POST("/user/totp/setup", h.RequireAuth, h.TOTPSetup)
+	g.POST("/user/totp/enable", h.RequireAuth, h.TOTPEnable)
+	g.POST("/user/totp/disable", h.RequireAuth, h.TOTPDisable)
+	// 个人中心自服务（登录态，M3-wave2）：改密/改邮箱。
+	g.POST("/user/password", h.RequireAuth, h.ChangeMyPassword)
+	g.POST("/user/email", h.RequireAuth, h.ChangeMyEmail)
 	// 登录用户自服务端点（M2-wave3）：仅要求登录，不要求 root（docs/05）。
 	g.POST("/user/topup", h.RequireAuth, h.TopupRedeem)
 	g.GET("/user/self", h.RequireAuth, h.GetSelf)
@@ -118,6 +150,9 @@ func (h *Handler) registerManaged(g *gin.RouterGroup) {
 
 // Login 用户名密码登录：IP 限频（1h×10）→ 校验 users 表（bcrypt），通过后
 // 签发签名会话 cookie。用户名不存在与密码错误返回同一错误（不泄露账号存在性）。
+// M3-wave2 二段式登录：已启用两步验证的用户签 Stage=1 短 TTL 会话并返回
+// {require_2fa:true}，前端凭该会话调 POST /api/user/login/2fa 完成第二段
+// （TOTPEnabled 且密钥为空的异常态按未启用处理，避免用户被锁死）。
 func (h *Handler) Login(c *gin.Context) {
 	if ok, retry := h.authRL.AllowRequest("login|"+c.ClientIP(), loginIPLimitWindow, loginIPLimitMax, 0); !ok {
 		writeRetryAfter(c, retry)
@@ -144,6 +179,13 @@ func (h *Handler) Login(c *gin.Context) {
 		writeErr(c, http.StatusForbidden, "user_disabled", "用户已被禁用")
 		return
 	}
+	// 二段式登录第一段（M3-wave2）：Stage=1 + 5min TTL 会话；不更新
+	// last_login_time（第二段完成时再记，保证语义为「完整登录时间」）。
+	if u.TOTPEnabled && u.TOTPSecret != "" {
+		h.sess.IssueStage(c, u.ID, u.AuthVersion, stageTOTP, totpStageTTL)
+		writeOK(c, gin.H{"require_2fa": true})
+		return
+	}
 	h.sess.Issue(c, u.ID, u.AuthVersion)
 	_ = h.st.Write.Model(&model.User{}).Where("id = ?", u.ID).
 		Update("last_login_time", time.Now().Unix()).Error
@@ -159,6 +201,56 @@ func (h *Handler) Login(c *gin.Context) {
 func (h *Handler) Logout(c *gin.Context) {
 	h.sess.Clear(c)
 	writeOK(c, nil)
+}
+
+// LoginTwoFactor 两步验证第二段（公开，M3-wave2）：凭 Stage=1 短 TTL 会话
+// 验 TOTP 码，通过后重签 Stage=0 完整会话。IP 限频与密码登录共用 login|IP
+// 预算（防绕过密码段直接爆破验证码；密码错误 + 多次验码失败会累积触发 429）。
+// 阶段/用户校验：会话必须为 stageTOTP 且 auth_version 与库一致（改密后
+// stage1 会话同样失效）。
+func (h *Handler) LoginTwoFactor(c *gin.Context) {
+	if ok, retry := h.authRL.AllowRequest("login|"+c.ClientIP(), loginIPLimitWindow, loginIPLimitMax, 0); !ok {
+		writeRetryAfter(c, retry)
+		return
+	}
+	uid, authv, stage, ok := h.sess.Verify(c)
+	if !ok {
+		writeErr(c, http.StatusUnauthorized, "unauthorized", "登录状态无效或已过期")
+		return
+	}
+	if stage != stageTOTP {
+		writeErr(c, http.StatusBadRequest, "invalid_request", "当前会话无需两步验证")
+		return
+	}
+	var u model.User
+	if err := h.st.Read.First(&u, uid).Error; err != nil || u.AuthVersion != authv {
+		writeErr(c, http.StatusUnauthorized, "unauthorized", "登录状态无效或已过期")
+		return
+	}
+	if u.Status != model.StatusEnabled {
+		writeErr(c, http.StatusForbidden, "user_disabled", "用户已被禁用")
+		return
+	}
+	var req struct {
+		Code string `json:"code"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Code == "" {
+		writeErr(c, http.StatusBadRequest, "invalid_request", "缺少验证码")
+		return
+	}
+	if u.TOTPSecret == "" || !otpValidateCode(req.Code, u.TOTPSecret) {
+		writeErr(c, http.StatusBadRequest, "totp_code_invalid", "验证码不正确")
+		return
+	}
+	h.sess.Issue(c, u.ID, u.AuthVersion)
+	_ = h.st.Write.Model(&model.User{}).Where("id = ?", u.ID).
+		Update("last_login_time", time.Now().Unix()).Error
+	writeOK(c, gin.H{
+		"id":           u.ID,
+		"username":     u.Username,
+		"display_name": u.DisplayName,
+		"role":         u.Role,
+	})
 }
 
 // writeErr 写出统一错误响应。

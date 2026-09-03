@@ -1,6 +1,7 @@
 // middleware.go 是管理面鉴权中间件（M2-wave1）：
 //
-//   - RequireAuth：会话有效 + 用户存在且启用 + auth_version 匹配（旧会话失效）；
+//   - RequireAuth：会话有效 + 用户存在且启用 + auth_version 匹配（旧会话失效）
+//   - Stage=0（M3-wave2 二段式登录：待 2FA 阶段会话 401 totp_required）；
 //   - RequireRoot：RequireAuth 语义 + role=100（管理 CRUD 全量要求）。
 //
 // 两者均为独立中间件（RequireRoot 内部完成登录校验，不与 RequireAuth 串联叠加）。
@@ -25,11 +26,18 @@ type authedUser struct {
 }
 
 // RequireAuth 校验会话并加载用户：无效会话/用户不存在/被禁用/auth_version
-// 不匹配（改密后旧会话失效）一律 401。通过后注入 currentUser。
+// 不匹配（改密后旧会话失效）一律 401；M3-wave2 二段式登录：Stage!=0（待两步
+// 验证阶段会话）也 401 totp_required——stageTOTP 会话仅 POST
+// /api/user/login/2fa 接受，业务端点拒绝半登录态防提权。通过后注入 currentUser。
 func (h *Handler) RequireAuth(c *gin.Context) {
-	uid, authv, ok := h.sess.Verify(c)
+	uid, authv, stage, ok := h.sess.Verify(c)
 	if !ok {
 		writeErr(c, http.StatusUnauthorized, "unauthorized", "登录状态无效或已过期")
+		c.Abort()
+		return
+	}
+	if stage != stageFull {
+		writeErr(c, http.StatusUnauthorized, "totp_required", "请先完成两步验证")
 		c.Abort()
 		return
 	}

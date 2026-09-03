@@ -1,6 +1,9 @@
 // session.go 实现 HMAC-SHA256 签名的会话 cookie（M2-wave1，docs/05）：
 // payload（JSON）base64url + "." + HMAC 签名；users.auth_version 纳入签名内容，
 // 递增（如改密/封禁）即让全部既有会话失效。TTL 7 天，HttpOnly + SameSite=Lax。
+// M3-wave2 增加 Stage 声明支持二段式登录：Stage=0 完整会话（业务端点）、
+// Stage=1 已过密码验证待两步验证（短 TTL，仅可用于 POST /api/user/login/2fa；
+// RequireAuth 对 Stage!=0 一律 401 totp_required，防半登录态越权访问）。
 package api
 
 import (
@@ -21,11 +24,23 @@ const SessionCookieName = "session"
 // sessionTTL 会话有效期。
 const sessionTTL = 7 * 24 * time.Hour
 
+// 会话阶段（sessionClaims.Stage）：0 完整会话；1 已过密码验证、待两步验证。
+const (
+	stageFull = 0
+	stageTOTP = 1
+)
+
+// totpStageTTL 是待两步验证阶段会话的有效期（短 TTL 限制半登录态暴露窗口）。
+const totpStageTTL = 5 * time.Minute
+
 // sessionClaims 是会话 payload。AuthV 参与签名校验：与 users.auth_version
-// 不一致即视为旧会话（中间件层比对后拒绝）。
+// 不一致即视为旧会话（中间件层比对后拒绝）。Stage 声明登录阶段（M3-wave2
+// 二段式登录）：旧 cookie 无该字段反序列化为零值 0 = 完整会话，向后兼容。
+// Stage 不可被客户端伪造：篡改 payload 即破坏 HMAC 签名（恒时比较拒绝）。
 type sessionClaims struct {
 	UID   int64 `json:"uid"`
 	AuthV int64 `json:"authv"`
+	Stage int   `json:"stage,omitempty"`
 	Exp   int64 `json:"exp"`
 	Iat   int64 `json:"iat"`
 }
@@ -41,13 +56,20 @@ func NewSessionManager(secret []byte) *SessionManager {
 	return &SessionManager{secret: secret, now: time.Now}
 }
 
-// Issue 为 uid 签发会话并写入 Set-Cookie。
+// Issue 为 uid 签发完整会话（Stage=0，标准 TTL）并写入 Set-Cookie。
 func (m *SessionManager) Issue(c *gin.Context, uid, authv int64) {
+	m.IssueStage(c, uid, authv, stageFull, sessionTTL)
+}
+
+// IssueStage 按调用方指定的阶段与 TTL 签发会话（M3-wave2 二段式登录：
+// 待两步验证阶段 Stage=1 + 短 TTL；完整登录 Stage=0 + 标准 TTL）。
+func (m *SessionManager) IssueStage(c *gin.Context, uid, authv int64, stage int, ttl time.Duration) {
 	now := m.now()
 	payload, _ := json.Marshal(sessionClaims{
 		UID:   uid,
 		AuthV: authv,
-		Exp:   now.Add(sessionTTL).Unix(),
+		Stage: stage,
+		Exp:   now.Add(ttl).Unix(),
 		Iat:   now.Unix(),
 	})
 	value := base64.RawURLEncoding.EncodeToString(payload) + "." + m.sign(payload)
@@ -55,42 +77,44 @@ func (m *SessionManager) Issue(c *gin.Context, uid, authv int64) {
 		Name:     SessionCookieName,
 		Value:    value,
 		Path:     "/",
-		MaxAge:   int(sessionTTL / time.Second),
+		MaxAge:   int(ttl / time.Second),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
 
-// Verify 校验会话 cookie，返回 uid 与签发时的 authv；无效返回 false。
-// 顺序：格式 → HMAC（hmac.Equal 恒时比较）→ JSON → 过期。
-func (m *SessionManager) Verify(c *gin.Context) (uid, authv int64, ok bool) {
+// Verify 校验会话 cookie，返回 uid、签发时的 authv 与登录阶段（stageFull/
+// stageTOTP）；无效返回 false。顺序：格式 → HMAC（hmac.Equal 恒时比较）→
+// JSON → 过期。Stage!=0 的访问限制在中间件层强制（stageTOTP 会话仅
+// /api/user/login/2fa 接受，见 middleware.go）。
+func (m *SessionManager) Verify(c *gin.Context) (uid, authv int64, stage int, ok bool) {
 	raw, err := c.Cookie(SessionCookieName)
 	if err != nil || raw == "" {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	payload, sig, found := strings.Cut(raw, ".")
 	if !found {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	data, err := base64.RawURLEncoding.DecodeString(payload)
 	if err != nil {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	want, err := base64.RawURLEncoding.DecodeString(sig)
 	if err != nil {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	if !hmac.Equal(want, m.mac(data)) {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	var cl sessionClaims
 	if err := json.Unmarshal(data, &cl); err != nil {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	if m.now().Unix() >= cl.Exp {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
-	return cl.UID, cl.AuthV, true
+	return cl.UID, cl.AuthV, cl.Stage, true
 }
 
 // Clear 下发过期同名 cookie 清除客户端会话（服务端无状态，不做记账）。

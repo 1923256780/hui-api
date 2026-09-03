@@ -113,8 +113,8 @@ func doJSONIP(t *testing.T, r *gin.Engine, method, path, ip string, body any) *h
 
 // ---- GET /api/setup ----
 
-// TestSetupFlags 默认能力发现全关（OAuth wave2 前恒 false）；开关与
-// Turnstile 配置后 site_key 仅在启用时下发。
+// TestSetupFlags 默认能力发现全关（未配置 OAuth 时三项均 false，M3-wave2 起
+// 按配置真实探测）；开关与 Turnstile 配置后 site_key 仅在启用时下发。
 func TestSetupFlags(t *testing.T) {
 	r, st, h := newTestAPI(t)
 	if _, err := EnsureRootUser(st); err != nil {
@@ -134,7 +134,7 @@ func TestSetupFlags(t *testing.T) {
 	}
 	oauth, ok := data["oauth"].(map[string]any)
 	if !ok || oauth["github"] != false || oauth["linuxdo"] != false || oauth["oidc"] != false {
-		t.Fatalf("OAuth wave2 前应恒 false: %v", data["oauth"])
+		t.Fatalf("未配置 OAuth 应恒 false: %v", data["oauth"])
 	}
 
 	setOpts(t, h, map[string]string{
@@ -580,7 +580,7 @@ func TestLoginIPLimit(t *testing.T) {
 // ---- options 脱敏与哨兵 ----
 
 // TestOptionMaskingAndSentinel 敏感键出口脱敏为 ******；PUT 哨兵值跳过不覆盖
-//（库内旧值保留），非哨兵值正常写入；白名单新前缀可写、内部键拒写。
+// （库内旧值保留），非哨兵值正常写入；白名单新前缀可写、内部键拒写。
 func TestOptionMaskingAndSentinel(t *testing.T) {
 	r, st, h := newTestAPI(t)
 	cookie := loginRoot(t, r, st)

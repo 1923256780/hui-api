@@ -9,6 +9,7 @@
 // 鉴权层级：四个端点全部公开（无需会话），安全边界由开关、限频与验证码承担。
 // IP 限频复用 internal/ratelimit 滑动窗口（authRL 与转发链路限流器隔离，
 // 避免注册/登录拒绝影响转发配额语义）；登录 IP 限频见 handler.go Login。
+// M3-wave2：OAuth 登录/绑定与 TOTP/个人中心端点拆分至 oauth.go/totp.go/profile.go。
 package api
 
 import (
@@ -53,7 +54,8 @@ const (
 )
 
 // FeatureFlags 返回公开特性开关（GET /api/setup 与 /api/status features 块共用）。
-// OAuth 各项在 M3-wave2 落地前恒为 false。
+// OAuth 三项按 options 配置真实探测（M3-wave2：github/linuxdo/oidc 各自
+// client_id/secret 配齐才可用，oidc 另需 issuer）。
 func FeatureFlags(rt *config.Runtime) gin.H {
 	registerEnabled := rt.GetBool(OptionKeyRegisterEnabled, false)
 	emailVerification := rt.GetBool(OptionKeyRegisterEmailVerification, false)
@@ -66,9 +68,9 @@ func FeatureFlags(rt *config.Runtime) gin.H {
 		"email_verification": emailVerification,
 		"turnstile_site_key": turnstileSiteKey,
 		"oauth": gin.H{
-			"github":  false, // M3-wave2 落地
-			"linuxdo": false, // M3-wave2 落地
-			"oidc":    false, // M3-wave2 落地
+			"github":  oauthProviderConfigured(rt, ProviderGitHub),
+			"linuxdo": oauthProviderConfigured(rt, ProviderLinuxDO),
+			"oidc":    oauthProviderConfigured(rt, ProviderOIDC),
 		},
 	}
 }
