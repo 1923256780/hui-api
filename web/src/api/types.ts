@@ -69,7 +69,7 @@ export interface Redemption {
   id: number
   key: string
   name: string
-  status: number // 1 未使用 2 已核销 3 已作废
+  status: number // 1 未使用 2 已核销 3 已作废 4 已过期
   quota: number
   created_by: number
   used_by: number

@@ -30,11 +30,12 @@ export const COMMON_STATUS: Record<number, StatusTag> = {
   3: { text: '熔断中', color: 'orange' },
 }
 
-// 兑换码状态（redemptions.status）。
+// 兑换码状态（redemptions.status；4=已过期由核销路径惰性标记，M2-wave3）。
 export const REDEMPTION_STATUS: Record<number, StatusTag> = {
   1: { text: '未使用', color: 'green' },
   2: { text: '已核销', color: 'blue' },
   3: { text: '已作废', color: 'red' },
+  4: { text: '已过期', color: 'orange' },
 }
 
 export function statusTag(status: number, map: Record<number, StatusTag>): StatusTag {

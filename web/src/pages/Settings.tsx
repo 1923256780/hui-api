@@ -141,6 +141,30 @@ const KEY_GROUPS: GroupDef[] = [
       },
     ],
   },
+  {
+    title: '观测 hooks',
+    description: '异步旁路事件投递（不阻塞请求）：OTLP/HTTP JSON 指标导出与 webhook 事件推送，失败自动降级丢弃并计数（docs/05）。',
+    keys: [
+      {
+        key: 'hooks.enabled',
+        label: 'hooks 总开关',
+        kind: 'bool',
+        placeholder: 'true / false',
+      },
+      {
+        key: 'hooks.otlp.endpoint',
+        label: 'OTLP 导出端点（OTLP/HTTP JSON，POST <endpoint>/v1/metrics）',
+        kind: 'text',
+        placeholder: 'http://127.0.0.1:4318',
+      },
+      {
+        key: 'hooks.webhook.url',
+        label: 'webhook 事件推送地址（超时 3s）',
+        kind: 'text',
+        placeholder: 'https://example.com/hui-webhook',
+      },
+    ],
+  },
 ]
 
 function validateValue(def: KeyDef, value: string): string | null {

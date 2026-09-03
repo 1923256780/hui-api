@@ -8,6 +8,7 @@ import ChannelsPage from './pages/Channels'
 import TokensPage from './pages/Tokens'
 import UsersPage from './pages/Users'
 import RedemptionsPage from './pages/Redemptions'
+import TopUpPage from './pages/TopUp'
 import LogsPage from './pages/Logs'
 import ModelsPage from './pages/Models'
 import SettingsPage from './pages/Settings'
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="tokens" element={<TokensPage />} />
         <Route path="users" element={<UsersPage />} />
         <Route path="redemptions" element={<RedemptionsPage />} />
+        <Route path="topup" element={<TopUpPage />} />
         <Route path="logs" element={<LogsPage />} />
         <Route path="models" element={<ModelsPage />} />
         <Route path="settings" element={<SettingsPage />} />

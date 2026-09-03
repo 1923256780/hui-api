@@ -14,6 +14,7 @@ import {
   SettingOutlined,
   TeamOutlined,
   UserOutlined,
+  WalletOutlined,
 } from '@ant-design/icons'
 import { api, clearSession, getSession } from '../api/client'
 
@@ -26,6 +27,7 @@ export const menuItems = [
   { key: '/console/tokens', icon: <KeyOutlined />, label: '令牌' },
   { key: '/console/users', icon: <TeamOutlined />, label: '用户' },
   { key: '/console/redemptions', icon: <GiftOutlined />, label: '兑换码' },
+  { key: '/console/topup', icon: <WalletOutlined />, label: '充值' },
   { key: '/console/logs', icon: <FileTextOutlined />, label: '日志' },
   { key: '/console/models', icon: <AppstoreOutlined />, label: '模型广场' },
   { key: '/console/settings', icon: <SettingOutlined />, label: '系统设置' },

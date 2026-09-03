@@ -1,6 +1,7 @@
 // Redemptions 兑换码管理：批量生成表单（count 1..100/面额/有效期）、分页列表
-//（状态：未使用/已核销/已作废）、删除。生成响应的明文 keys 仅此一次，弹窗展示
-// 并支持整批复制；核销状态机属 wave3。
+//（状态：未使用/已核销/已作废/已过期——过期由核销路径惰性标记，M2-wave3）、
+// 删除。生成响应的明文 keys 仅此一次，弹窗展示并支持整批复制；用户兑换与
+// 额度划转入口见 /console/topup。
 import { useCallback, useEffect, useState } from 'react'
 import {
   Alert,
@@ -243,7 +244,7 @@ export default function RedemptionsPage() {
           </Form.Item>
         </Form>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          数量 1..100；核销功能（兑换 → 令牌加额）将在后续波次交付。
+          数量 1..100；用户兑换与额度划转入口：/console/topup（核销状态机已交付）。
         </Text>
       </Card>
 
