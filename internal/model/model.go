@@ -18,12 +18,6 @@ const (
 	StatusTripped  = 3 // 熔断中（仅 channels 使用）
 )
 
-// 用户角色（users.role，M2-wave1）。
-const (
-	RoleCommon = 1   // 普通用户
-	RoleRoot   = 100 // 管理员（管理面全量权限）
-)
-
 // 兑换码状态（redemptions.status）。
 const (
 	RedemptionUnused   = 1 // 未使用

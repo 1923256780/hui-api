@@ -22,7 +22,7 @@ const RootUsername = "root"
 // 幂等：已存在任何 root 用户时不做任何变更。返回是否新建。
 func EnsureRootUser(st *store.Store) (bool, error) {
 	var n int64
-	if err := st.Read.Model(&model.User{}).Where("role = ?", model.RoleRoot).Count(&n).Error; err != nil {
+	if err := st.Read.Model(&model.User{}).Where("role = ?", model.RoleAdmin).Count(&n).Error; err != nil {
 		return false, err
 	}
 	if n > 0 {
@@ -39,7 +39,7 @@ func EnsureRootUser(st *store.Store) (bool, error) {
 	u := model.User{
 		Username:     RootUsername,
 		PasswordHash: hash,
-		Role:         model.RoleRoot,
+		Role:         model.RoleAdmin,
 		Status:       model.StatusEnabled,
 		DisplayName:  "Administrator",
 		AuthVersion:  1,

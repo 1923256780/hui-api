@@ -11,6 +11,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/1923256780/hui-api/internal/billing"
+	"github.com/1923256780/hui-api/internal/config"
+	"github.com/1923256780/hui-api/internal/gateway"
 	"github.com/1923256780/hui-api/internal/model"
 	"github.com/1923256780/hui-api/internal/store"
 )
@@ -27,12 +30,22 @@ func newTestAPI(t *testing.T) (*gin.Engine, *store.Store, *Handler) {
 	if _, err := st.Migrate(); err != nil {
 		t.Fatalf("迁移失败: %v", err)
 	}
+	rt, err := config.NewRuntime(st)
+	if err != nil {
+		t.Fatalf("构造运行轨失败: %v", err)
+	}
+	pricer, err := billing.NewEngine(rt)
+	if err != nil {
+		t.Fatalf("构造计费引擎失败: %v", err)
+	}
+	gw := gateway.New(st, rt, pricer)
+	t.Cleanup(gw.Close)
 	gin.SetMode(gin.TestMode)
 	now := time.Unix(0, 0)
 	sess := NewSessionManager([]byte("test-secret"))
 	sess.now = func() time.Time { return now }
 
-	h := New(st, sess)
+	h := New(st, rt, gw, sess)
 	r := gin.New()
 	h.Register(r)
 	r.GET("/api/_probe_auth", h.RequireAuth, func(c *gin.Context) { c.String(http.StatusOK, "ok") })
@@ -204,7 +217,7 @@ func TestEnsureRootUserIdempotent(t *testing.T) {
 	if err := st.Read.Where("username = ?", RootUsername).First(&u).Error; err != nil {
 		t.Fatalf("root 用户应存在: %v", err)
 	}
-	if u.Role != model.RoleRoot || !CheckPassword(u.PasswordHash, "env-root-pass") {
+	if u.Role != model.RoleAdmin || !CheckPassword(u.PasswordHash, "env-root-pass") {
 		t.Fatalf("root 应 role=100 且 env 口令可登录，role=%d", u.Role)
 	}
 
@@ -261,7 +274,7 @@ func TestLoginLogoutFlow(t *testing.T) {
 // TestAuthVersionInvalidatesSession auth_version 递增后，旧会话立即失效（401）。
 func TestAuthVersionInvalidatesSession(t *testing.T) {
 	r, st, _ := newTestAPI(t)
-	u := seedUser(t, st, "alice", "alice-pass", model.RoleCommon)
+	u := seedUser(t, st, "alice", "alice-pass", model.RoleUser)
 
 	w := doJSON(t, r, http.MethodPost, "/api/user/login", "",
 		map[string]string{"username": "alice", "password": "alice-pass"})
@@ -291,7 +304,7 @@ func TestAuthVersionInvalidatesSession(t *testing.T) {
 // TestRequireRootForbidden 普通用户：可过 RequireAuth，但 root 端点 403。
 func TestRequireRootForbidden(t *testing.T) {
 	r, st, _ := newTestAPI(t)
-	seedUser(t, st, "bob", "bob-pass", model.RoleCommon)
+	seedUser(t, st, "bob", "bob-pass", model.RoleUser)
 
 	w := doJSON(t, r, http.MethodPost, "/api/user/login", "",
 		map[string]string{"username": "bob", "password": "bob-pass"})

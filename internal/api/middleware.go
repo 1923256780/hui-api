@@ -49,7 +49,7 @@ func (h *Handler) RequireRoot(c *gin.Context) {
 	if c.IsAborted() {
 		return
 	}
-	if u := currentUser(c); u == nil || u.Role != model.RoleRoot {
+	if u := currentUser(c); u == nil || u.Role != model.RoleAdmin {
 		writeErr(c, http.StatusForbidden, "forbidden", "需要管理员权限")
 		c.Abort()
 	}
