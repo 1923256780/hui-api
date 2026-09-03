@@ -9,6 +9,27 @@
 
 ### 新增
 
+- M3-wave3 支付对接 + 邀请返利（Task #21）：internal/payment 适配层零 SDK 依赖——
+  epay.go（MD5 签名：参数名字典序 k=v& 末尾接 key、空值与 sign/sign_type 不参与、
+  hex 小写、恒时比较验签；SubmitURL 构造）与 stripe.go（Checkout Session 创建：form
+  编码 + Basic secret_key + price_data 自定义金额 + metadata.order_no 回传；
+  WebhookVerify：Stripe-Signature t/v1 解析、HMAC-SHA256("{t}.{raw_body}") 恒时比较、
+  ±5min 防重放、多 v1 任一匹配）；internal/api/order.go 六端点——POST
+  /api/user/topup/order（登录态下单：网关开关/金额区间/配置完整性校验 → 汇率定点
+  快照换算 quota → pending 订单 → 支付跳转 URL；stripe 先建 session 后落库防孤儿单）、
+  GET /api/user/topup/orders（本人分页）、GET /api/pay/epay/notify（公开，验签 + 金额
+  逐位校验 + 条件 UPDATE pending→paid 幂等结算 → 买家入账 → topup 日志 → aff 返利，
+  纯文本 success/fail）、GET /api/pay/epay/return（302 /console/topup?order=）、
+  POST /api/pay/stripe/webhook（公开 raw body ≤1MB，验签 → checkout.session.completed
+  → metadata.order_no → 同上幂等结算）、GET /api/user/aff（邀请码惰性补发/邀请人数/
+  累计返利/返利比例）；aff 返利在结算事务内：inviter_id>0 且 rebate_percent>0 时
+  inviter.quota += round(quota×pct/100) 并同步累加 aff_history_quota + protocol="aff"
+  日志；前端 TopUp 在线充值区块（/api/setup topup 开关才渲染 + 网关选择 + 金额输入 +
+  整页跳转 pay_url + 回跳 ?order= 查单展示）与充值订单列表、新建 Invite 邀请返利页
+  （邀请码/链接复制复用 Register ?aff= 预填、累计返利/邀请人数/比例）+ 路由菜单；
+  测试（payment：MD5 黄金向量/验签篡改矩阵/Webhook 三态与边界/Checkout 请求形态；
+  api：下单校验矩阵/双网关快照/12 goroutine 重复通知恰一次入账含返利/归属越权/
+  aff 惰性码），`go test ./... -race` 全绿；契约 docs/05 §5.10、口径 docs/04 第九节；
 - M3-wave2 OAuth + 2FA + 个人中心（Task #20）：OAuth 通用 provider
   （internal/api/oauth.go）——github/linuxdo/oidc 三 provider（配置键
   oauth.*.client_id/secret + oauth.oidc.issuer，未配置 404 oauth_not_configured），

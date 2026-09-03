@@ -1,6 +1,6 @@
 # 05-API契约
 
-> 状态：**活文档**。转发面契约已于 M1-wave2 落地并细化（见第四节）；管理面契约已于 M2-wave1 落地并细化（见第五节，登录会话 + 六组端点）；公开注册体系契约已于 M3-wave1 落地并细化（见 5.7）；后续波次增量更新。
+> 状态：**活文档**。转发面契约已于 M1-wave2 落地并细化（见第四节）；管理面契约已于 M2-wave1 落地并细化（见第五节，登录会话 + 六组端点）；公开注册体系契约已于 M3-wave1 落地并细化（见 5.7）；在线充值与邀请返利契约已于 M3-wave3 落地并细化（见 5.10）；后续波次增量更新。
 
 ## 一、端点清单（规划）
 
@@ -34,6 +34,11 @@
 | `POST /api/verification_code` | 发送邮箱验证码（公开，SMTP 就绪性门控 + 重发限频） | ✅ M3-wave1 |
 | `POST /api/user/reset_password` | 邮箱验证码重置密码（公开，验码 + bcrypt + auth_version++） | ✅ M3-wave1 |
 | `/api/status` | 服务状态、版本、schema 版本、features 特性开关块（无鉴权） | ✅ M0（features M3-wave1） |
+| `POST /api/user/topup/order` | 在线下单（登录态）：网关开关 + 金额区间校验 → 汇率快照换算额度 → pending 订单 + 支付跳转 URL | ✅ M3-wave3 |
+| `GET /api/user/topup/orders` | 本人充值订单分页（登录态，所有权作用域） | ✅ M3-wave3 |
+| `GET /api/pay/epay/notify` `return` | EPay 异步通知（验签 + 幂等结算，纯文本 success/fail）/ 同步回跳 302（公开） | ✅ M3-wave3 |
+| `POST /api/pay/stripe/webhook` | Stripe webhook（验签 + checkout.session.completed 幂等结算，公开） | ✅ M3-wave3 |
+| `GET /api/user/aff` | 邀请信息：邀请码/邀请人数/累计返利/返利比例（登录态） | ✅ M3-wave3 |
 
 ## 二、契约约定（总体）
 
@@ -56,6 +61,8 @@
 - [x] M2 收官：自服务统计端点 `/api/user/stats` 契约细化 + 看板按角色取数注记（2026-09-03）
 - [x] M3-wave1：公开注册体系契约细化——setup/register/verification_code/reset_password
   四端点 + /api/status features 块 + options 商业化前缀与脱敏哨兵（2026-09-03）
+- [x] M3-wave3：在线充值订单与支付回调契约——下单/订单列表/epay notify+return/
+  stripe webhook + 邀请信息端点（2026-09-03）
 - [ ] M4：管理面 `Idempotency-Key` 头语义复核（当前以 PUT 整对象幂等写替代）
 
 ## 四、转发面契约（M1-wave2 落地，M1-wave3 补计费）
@@ -119,7 +126,7 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 
 ### 5.1 通用约定
 
-- **鉴权**：除 `/api/user/login`、`/api/user/logout`、`/api/status` 外全部要求 root 会话（签名 cookie，缺失/篡改/过期/禁用/auth_version 不匹配 → 401/403）；例外：用户自服务组（`/api/user/topup`、`/api/user/self`、`/api/user/stats`、`/api/token/:id/assign`、`/api/token/mine`，及 M3-wave2 的 `/api/user/password`、`/api/user/email`、`/api/user/totp/*`、`/api/user/identities*`、`/api/oauth/:provider/bind`）仅要求登录态（RequireAuth，普通用户可访）；公开组（M3-wave1：`/api/setup`、`/api/user/register`、`/api/verification_code`、`/api/user/reset_password`；M3-wave2：`/api/oauth/:provider`、`/api/oauth/:provider/callback`、`/api/user/login/2fa`）无会话要求，安全边界由开关门控 + IP 限频 + 人机校验/验证码/state cookie 承担（见 5.7/5.8）。**半登录态（M3-wave2）**：TOTP 启用用户的 stage1 会话（Stage≠0）只能访问 `/api/user/login/2fa`，访问其他 RequireAuth 端点一律 401 `totp_required`（防半登录提权，见 5.9）。
+- **鉴权**：除 `/api/user/login`、`/api/user/logout`、`/api/status` 外全部要求 root 会话（签名 cookie，缺失/篡改/过期/禁用/auth_version 不匹配 → 401/403）；例外：用户自服务组（`/api/user/topup`、`/api/user/self`、`/api/user/stats`、`/api/token/:id/assign`、`/api/token/mine`，及 M3-wave2 的 `/api/user/password`、`/api/user/email`、`/api/user/totp/*`、`/api/user/identities*`、`/api/oauth/:provider/bind`，及 M3-wave3 的 `/api/user/topup/order`、`/api/user/topup/orders`、`/api/user/aff`）仅要求登录态（RequireAuth，普通用户可访）；公开组（M3-wave1：`/api/setup`、`/api/user/register`、`/api/verification_code`、`/api/user/reset_password`；M3-wave2：`/api/oauth/:provider`、`/api/oauth/:provider/callback`、`/api/user/login/2fa`）无会话要求，安全边界由开关门控 + IP 限频 + 人机校验/验证码/state cookie 承担（见 5.7/5.8）；M3-wave3 支付回调（`/api/pay/epay/notify`、`/api/pay/epay/return`、`/api/pay/stripe/webhook`）无会话要求，安全边界由签名验签 + 金额逐位校验承担（见 5.10）。**半登录态（M3-wave2）**：TOTP 启用用户的 stage1 会话（Stage≠0）只能访问 `/api/user/login/2fa`，访问其他 RequireAuth 端点一律 401 `totp_required`（防半登录提权，见 5.9）。
 - **响应包裹**：成功 `{"success":true,"message":"","data":...}`，失败 `{"success":false,"message":"...","code":"语义码"}`；创建类返回 201，其余 200；连通测试结果语义不落库不影响熔断（HTTP 恒 200）。
 - **幂等写**：PUT 为整对象幂等替换——显式字段含零值全部生效，同 body 重复 PUT 响应体一致；缺省归一化：status 0→启用、token.expired_time 0→永久（`-1`）、group 空→`default`、user.role 0→普通用户；channel.key 空=保留旧值（唯一例外，防回显脱敏值覆盖明文）；token 的 key/key_hash/user_id 与 root 自身 role/status 不可经 PUT 修改。
 - **分页**：`?page=1&page_size=20`（page_size 上限 100），响应 `data.items/total/page/page_size`；列表排序：channel/option 按 id 升序或 key 字典序，token/redemption/log 按 id 降序。
@@ -154,6 +161,12 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 | `GET /api/user/stats` | -（登录态） | 当前用户今日统计 `{start_timestamp,end_timestamp,requests,prompt_tokens,completion_tokens,tokens,quota,models[]}`；服务端 SQL 聚合 logs，作用域恒为会话用户（user_id 查询参数被忽略）；models 按 quota 降序上限 100 行（`model_name/requests/prompt_tokens/completion_tokens/quota`）；时间口径=服务器本地今日 [0 点，当前]；无日志返回全零空态（200 非错误） |
 | `POST /api/token/:id/assign` | `{quota>0}`（登录态；归属者或管理员） | `{quota_assigned,remain_quota}`；用户余额 → 令牌 remain+quota 同步增加的转移事务；余额不足 400 `insufficient_quota`；unlimited 令牌 400 拒绝 |
 | `GET /api/token/mine` | -（登录态） | 当前用户名下令牌分页列表（形状同管理列表 items/total/page/page_size，id 降序）；所有权作用域强制取会话用户（user_id 查询参数被忽略）；响应为白名单字段——不含 key/key_hash（密钥材料）与 tpm_rpm/tags/allow_ips（管理配置字段） |
+| `POST /api/user/topup/order` | `{gateway:"epay"\|"stripe",amount_cents}`（登录态） | 网关开关校验 → min/max 金额校验 → 配置完整性 → 汇率快照换算 quota（口径见 5.10/docs/04）→ pending 订单 → `{order_no,pay_url,quota}`；stripe 先建 Checkout Session 后落库（防孤儿单），创建失败 502 `gateway_create_failed` |
+| `GET /api/user/topup/orders` | `?page&page_size`（登录态） | 本人订单分页（id 降序，模型字段直出）；状态 1 待支付 2 已支付 3 失败 4 已过期 |
+| `GET /api/pay/epay/notify` | EPay GET 回调（公开） | 纯文本应答：验签 → 金额逐位校验 → 事务【条件 UPDATE pending→paid（RowsAffected=0 幂等跳过）→ 买家入账 → topup 日志 → aff 返利】→ `success`；任一步失败 `fail` 不动账（见 5.10） |
+| `GET /api/pay/epay/return` | EPay 同步回跳（公开） | 302 `/console/topup?order=<order_no>`（仅导航用，不参与安全边界） |
+| `POST /api/pay/stripe/webhook` | Stripe webhook（公开，raw body ≤1MB） | Stripe-Signature 验签（t/v1 + HMAC-SHA256 恒时比较 + ±5min）→ `checkout.session.completed` → metadata.order_no → 同上幂等结算 → 200；其他事件 200 忽略；订单不符 400 `order_mismatch` |
+| `GET /api/user/aff` | -（登录态） | `{aff_code,invited_count,aff_history_quota,rebate_percent}`；aff_code 空时惰性生成落库；返利入账只发生在结算事务内，本端点只读 |
 
 ### 5.3 错误码表（管理面语义错误）
 
@@ -185,6 +198,14 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 | 400 | `totp_not_enabled` | 未启用两步验证时调 disable（M3-wave2） |
 | 400 | `identity_last` | 无口令用户解绑最后一个第三方身份（防锁死，M3-wave2） |
 | 400 | `old_password_mismatch` | 修改口令时旧口令不正确（M3-wave2） |
+| 403 | `gateway_disabled` | 请求的支付网关未启用（`epay.enabled`/`stripe.enabled` 非 true，M3-wave3） |
+| 400 | `gateway_not_configured` | 网关已启用但密钥/网关地址未配置（M3-wave3） |
+| 400 | `amount_out_of_range` | 充值金额超出 `topup.min_amount_cents`/`max_amount_cents` 区间（M3-wave3） |
+| 502 | `gateway_create_failed` | Stripe Checkout Session 创建失败（不落库防孤儿单，M3-wave3） |
+| 500 | `topup_order_failed` | 充值订单落库失败（M3-wave3） |
+| 400 | `invalid_signature` | Stripe webhook 验签失败（恒时比较失败或时间戳超 ±5min；epay notify 同场景应答纯文本 fail，M3-wave3） |
+| 400 | `order_mismatch` | 回调与订单不符：网关不匹配或金额不一致，拒绝结算（M3-wave3） |
+| 500 | `settle_failed` | 订单结算事务失败（买家缺失或存储错误；Stripe 侧会重试，M3-wave3） |
 
 ### 5.4 限流契约（M2-wave1，转发面）
 
@@ -226,6 +247,14 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
   `GET /api/user/stats`（服务端 SQL 聚合，一次请求返回汇总与模型分布，无截断）；两类
   数据源加载失败均优雅降级空态（0 值卡片 + 空表 + console.warn 留痕），不显示错误横幅——
   普通用户页面禁止直调管理面端点（/api/log 为 root 专属，直调 403）。
+- **在线充值与邀请返利页（M3-wave3）**：/console/topup 的「在线充值」区块按
+  `GET /api/setup` 的 `topup` 网关开关渲染（epay/stripe Radio），下单
+  `POST /api/user/topup/order` 成功后 `window.location.assign(pay_url)` 整页跳转；
+  支付回跳 `/console/topup?order=<order_no>` 时从订单列表首页回查该单展示支付状态
+  （order_no 全局唯一，回跳单必为最新订单；未命中提示刷新，不轮询）；订单列表
+  `GET /api/user/topup/orders`（TOPUP_ORDER_STATUS 状态映射）。/console/invite 调
+  `GET /api/user/aff`：邀请码与邀请链接（`{origin}/register?aff={code}`，Register 页
+  ?aff= 预填复用）复制、累计返利、邀请人数、返利比例。
 
 ### 5.6 hooks 事件投递契约（M2-wave3）
 
@@ -357,3 +386,57 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
     重签当前会话**（无缝续用）。
   - `POST /api/user/email {email}`：格式校验 + 查重（409 `email_conflict`）。暂不强制
     邮箱验证码（后续商业化增强项）；改后即可走忘记密码流程找回无口令账号。
+
+### 5.10 在线充值与邀请返利契约（M3-wave3）
+
+涉及文件 `internal/api/order.go`（下单/回调/列表/结算事务）、`aff.go`（邀请信息）、
+`internal/payment`（epay.go MD5 签名层 / stripe.go Checkout+Webhook 层，不引
+stripe-go SDK）。
+
+- **配置键**（options，写后热生效）：`epay.enabled`/`epay.gateway`/`epay.pid`/
+  `epay.secret_key`/`epay.pay_type`；`stripe.enabled`/`stripe.secret_key`/
+  `stripe.webhook_secret`；`topup.usd_cny_rate`（缺省 720）、`topup.min_amount_cents`
+  （缺省 100，配置 ≤0 兑底 1）、`topup.max_amount_cents`（0=不限）；`aff.rebate_percent`
+  （0=返利关闭）。
+- **下单**（`POST /api/user/topup/order`，登录态）：`{gateway, amount_cents}` →
+  网关开关校验（403 `gateway_disabled`）→ 金额区间校验（400 `amount_out_of_range`）→
+  配置完整性（400 `gateway_not_configured`）→ 汇率换算额度 → 落 pending 订单
+  （rate 快照与金额同记）→ `{order_no, pay_url, quota}`。
+- **额度换算口径**：`quota = (amount_cents × 500000 + rate/2) / rate`（整数四舍五入）。
+  rate 为「每 1 USD 的 CNY 分数 ×100」定点快照——epay 以 CNY 计价，rate=
+  `topup.usd_cny_rate`（如 720 表示 ¥7.20/$1）；stripe 以 USD 本位计价，rate=100。
+  示例：epay 下单 1000 分（¥10）× rate 720 → quota 694444；stripe 下单 1000 分（$10）
+  × rate 100 → quota 5000000。
+- **结算事务**（`settleTopupOrder`，两回调共用）：查单 → 网关匹配 → 币种
+  EqualFold → **金额逐位校验**（回调 money_minor 与订单 amount_cents 一致）→
+  **条件 UPDATE `status 1→2 WHERE id=? AND status=1`**（RowsAffected=0 即重复
+  通知，幂等跳过不重复入账）→ 买家 quota 入账 → `protocol="topup"` 日志
+  （ModelName=order_paid）→ aff 返利（inviter_id>0 且 rebate_percent>0：
+  inviter.quota += (quota×pct+50)/100，aff_history_quota 同步累加，写
+  `protocol="aff"` 日志 ModelName=topup_rebate）——全事务原子，任何一步失败整体回滚。
+- **EPay 回调**（公开，纯文本应答）：`GET /api/pay/epay/notify` 验签（MD5：参数名
+  字典序 `k=v&` 拼接、空值与 sign/sign_type 不参与、末尾接 key、hex 小写、
+  恒时比较）→ `trade_status` 为 TRADE_SUCCESS/TRADE_FINISHED 才结算，其他状态
+  应答 `success` 不动账（确认已知意防重发）→ 结算成功 `success`，验签/查单/金额
+  不符 `fail`（网关侧会重试）；`GET /api/pay/epay/return` 同步回跳 302
+  `/console/topup?order=<order_no>`（仅导航用，真实入账以 notify 为准）。
+- **Stripe 回调**（公开）：`POST /api/pay/stripe/webhook` 读 raw body（≤1MB）→
+  `Stripe-Signature` 头 t/v1 解析 → HMAC-SHA256(`"{t}.{raw_body}"`) 恒时比较
+  （多 v1 任一匹配）→ 时间戳 ±5min 防重放 → `checkout.session.completed` 事件取
+  `metadata.order_no`/`amount_total`/`currency` → 复用结算事务 → 200；其他事件
+  类型 200 忽略；验签失败 400 `invalid_signature`、订单不符 400 `order_mismatch`、
+  结算失败 500 `settle_failed`（Stripe 侧重试）。Checkout Session 创建（下单时同步
+  调 Stripe API）：form 编码 + Basic `secret_key`，
+  `line_items[0][price_data][unit_amount]` 自定义金额，`metadata[order_no]` 回传；
+  success_url/cancel_url 均指向 `/console/topup?order=<order_no>`；创建失败
+  502 `gateway_create_failed` 且**不落库**（防孤儿单）；APIBase 仅部署方可注入
+  （SSRF 信任边界，权衡注记 docs/11）。
+- **订单列表**（`GET /api/user/topup/orders`，登录态）：本人作用域分页（id 降序），
+  模型字段直出（order_no/gateway/amount_cents/currency/quota/rate/status/trade_no/
+  detail/paid_time/created_time）；状态机 1=待支付 2=已支付 3=失败 4=已过期。
+- **邀请信息**（`GET /api/user/aff`，登录态）：`{aff_code, invited_count,
+  aff_history_quota, rebate_percent}`；aff_code 空时惰性生成落库（31^8 碰撞域）；
+  返利入账只发生在结算事务内，本端点只读（口径见 docs/04 第九节）。
+- **测试注入点**：`h.stripeHTTP`/`h.stripeAPIBase` 同包小写字段可指向 httptest 假
+  Stripe 端点断言请求形态；epay 验签纯函数直接构造 query；并发幂等证据
+  TestEpayNotifyIdempotentConcurrent（12 goroutine 重复通知同一订单，恰一次入账含返利）。
