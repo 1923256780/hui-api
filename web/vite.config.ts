@@ -9,9 +9,10 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    // 本地开发时把管理 API 代理到后端进程（go run ./cmd/hui-api -addr :3100）。
+    // 本地开发时把管理 API 与转发面代理到后端进程（go run ./cmd/hui-api -addr :3100）。
     proxy: {
       '/api': 'http://127.0.0.1:3100',
+      '/v1': 'http://127.0.0.1:3100',
     },
   },
 })

@@ -1,12 +1,13 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { ConfigProvider } from 'antd'
+import { ConfigProvider, App as AntdApp } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
+import { BrowserRouter } from 'react-router-dom'
 import App from './App'
 import './index.css'
 
-// 管理台入口。M1-wave1 只交付外壳：登录占位 + 空白布局，
-// 主题细节（暗色模式、密度）与真实页面在 M4 逐波填充。
+// 管理台入口：AntD 中文 locale + 主题 + App 上下文（message/modal 经 useApp 使用，
+// 避免 React 18 并发特性下的静态方法告警）+ BrowserRouter（go:embed 提供 SPA 回退）。
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ConfigProvider
@@ -18,7 +19,11 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         },
       }}
     >
-      <App />
+      <AntdApp>
+        <BrowserRouter>
+          <App />
+        </BrowserRouter>
+      </AntdApp>
     </ConfigProvider>
   </React.StrictMode>,
 )

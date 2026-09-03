@@ -1,4 +1,4 @@
-/* hui-api 管理台全局样式（M1-wave1 外壳最简版，设计系统在 M4 细化）。 */
+/* hui-api 管理台全局样式（M2-wave2：控制台真实页面版）。 */
 
 html,
 body,
@@ -47,4 +47,28 @@ body,
 .app-header-actions {
   display: inline-flex;
   align-items: center;
+}
+
+/* 页面顶部工具条：左刷新右动作 */
+.page-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+/* 日志明细等 JSON 美化展示 */
+.json-pre {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  background: #f6f8fa;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
