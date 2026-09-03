@@ -48,10 +48,14 @@ func TestUserStatsScopeAndLeakage(t *testing.T) {
 	bob := seedUser(t, st, "bob", "pw-bob", model.RoleUser)
 
 	now := time.Now()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 8, 0, 0, 0, now.Location()).Unix()
-	yesterday := today - 86400
+	// 今日种子取当前时刻：恒落在本端点今日窗口 [今日 0 点, now] 内——固定
+	// 「今天 8 点」的写法在 0:00-8:00 运行时落入未来（窗口外）导致断言失败
+	//（跨零点时间脆弱，2026-09-04 0:10 全量验证时首次暴露）；负例取 25h 前，
+	// 恒早于今日 0 点，语义不变（今日之前的旧日志不计入今日）。
+	today := now.Unix()
+	yesterday := now.Add(-25 * time.Hour).Unix()
 
-	// alice：今日两条（model-b 消耗更高）+ 昨日一条（不计入今日）。
+	// alice：今日两条（model-b 消耗更高）+ 今日之前一条（不计入今日）。
 	seedLog(t, st, &model.Log{UserID: alice.ID, ModelName: "model-a",
 		PromptTokens: 100, CompletionTokens: 50, Quota: 300, CreatedTime: today})
 	seedLog(t, st, &model.Log{UserID: alice.ID, ModelName: "model-b",

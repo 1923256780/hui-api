@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,11 +40,16 @@ func enableEpay(t *testing.T, h *Handler) {
 	})
 }
 
+// orderNoSeq 订单号唯一化序号：Windows 时钟粒度（约 15.6ms）下连续 seed 的
+// UnixNano 可能相同而撞 order_no 唯一索引（CI Linux 精度高未暴露），追加
+// 原子序数保证恒唯一。
+var orderNoSeq atomic.Int64
+
 // seedTopupOrder 写入一笔指定状态的充值订单并返回。
 func seedTopupOrder(t *testing.T, st *store.Store, uid int64, gateway, currency string, amountCents, quota, rate, status int64) model.TopupOrder {
 	t.Helper()
 	o := model.TopupOrder{
-		OrderNo:     fmt.Sprintf("TPTEST%d", time.Now().UnixNano()),
+		OrderNo:     fmt.Sprintf("TPTEST%d-%d", time.Now().UnixNano(), orderNoSeq.Add(1)),
 		UserID:      uid,
 		Gateway:     gateway,
 		AmountCents: amountCents,
