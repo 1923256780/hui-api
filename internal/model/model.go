@@ -18,6 +18,12 @@ const (
 	StatusTripped  = 3 // 熔断中（仅 channels 使用）
 )
 
+// 用户角色（users.role，M2-wave1）。
+const (
+	RoleCommon = 1   // 普通用户
+	RoleRoot   = 100 // 管理员（管理面全量权限）
+)
+
 // 兑换码状态（redemptions.status）。
 const (
 	RedemptionUnused   = 1 // 未使用
@@ -69,12 +75,12 @@ type Token struct {
 	RemainQuota    int64  `gorm:"column:remain_quota;not null;default:0" json:"remain_quota"`
 	UnlimitedQuota bool   `gorm:"column:unlimited_quota;not null;default:false" json:"unlimited_quota"`
 	BudgetDuration string `gorm:"column:budget_duration;size:16;not null;default:''" json:"budget_duration"`
-	BudgetResetAt  int64  `gorm:"column:budget_reset_at;not null;default:0" json:"budget_reset_at"` // 下次预算重置时间（unix 秒）
-	TPMRPM         string `gorm:"column:tpm_rpm;size:128;not null;default:''" json:"tpm_rpm"`       // JSON: {"tpm":..,"rpm":..}
-	Tags           string `gorm:"column:tags;size:512;not null;default:''" json:"tags"`             // JSON 数组，如 ["team-a"]
-	Group          string `gorm:"column:group;size:64;not null;default:'default'" json:"group"`     // 令牌分组：GroupRatio 组倍率与分组级限流的归属组（M2-wave1）
+	BudgetResetAt  int64  `gorm:"column:budget_reset_at;not null;default:0" json:"budget_reset_at"`     // 下次预算重置时间（unix 秒）
+	TPMRPM         string `gorm:"column:tpm_rpm;size:128;not null;default:''" json:"tpm_rpm"`           // JSON: {"tpm":..,"rpm":..}
+	Tags           string `gorm:"column:tags;size:512;not null;default:''" json:"tags"`                 // JSON 数组，如 ["team-a"]
+	Group          string `gorm:"column:group;size:64;not null;default:'default'" json:"group"`         // 令牌分组：GroupRatio 组倍率与分组级限流的归属组（M2-wave1）
 	ModelLimits    string `gorm:"column:model_limits;size:512;not null;default:''" json:"model_limits"` // 模型白名单（逗号分隔；空=不限）
-	AllowIPs       string `gorm:"column:allow_ips;size:512;not null;default:''" json:"allow_ips"`   // IP 白名单（逗号分隔 IP/CIDR；空=不限）
+	AllowIPs       string `gorm:"column:allow_ips;size:512;not null;default:''" json:"allow_ips"`       // IP 白名单（逗号分隔 IP/CIDR；空=不限）
 	ExpiredTime    int64  `gorm:"column:expired_time;not null;default:-1" json:"expired_time"`
 	CreatedTime    int64  `gorm:"column:created_time;not null;default:0" json:"created_time"`
 	AccessedTime   int64  `gorm:"column:accessed_time;not null;default:0" json:"accessed_time"`
