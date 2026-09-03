@@ -274,6 +274,129 @@ func TestTransformParamOverrideRejects(t *testing.T) {
 	}
 }
 
+// ---- param_override：顺序等价性守卫 ----
+
+// applyEnvelopeInOrder 按数组顺序逐个应用单操作，模拟旧 envelope 的顺序语义：
+// 每个单操作 envelope 经 TransformParamOverride 得扁平产物后走真实 override.Apply，
+// 保证模拟口径与 hui 管道完全一致（单操作序列天然通过顺序等价检查）。
+func applyEnvelopeInOrder(t *testing.T, body []byte, opsJSON string) []byte {
+	t.Helper()
+	var env legacyOverrideEnvelope
+	if err := json.Unmarshal([]byte(opsJSON), &env); err != nil {
+		t.Fatalf("解析测试 envelope 失败: %v", err)
+	}
+	for _, op := range *env.Operations {
+		single, err := json.Marshal(legacyOverrideEnvelope{Mode: "advanced",
+			Operations: &[]legacyOverrideOp{op}})
+		if err != nil {
+			t.Fatalf("marshal 单操作: %v", err)
+		}
+		flat, err := TransformParamOverride(string(single))
+		if err != nil {
+			t.Fatalf("单操作变换失败（%s %s）: %v", op.Mode, op.Path, err)
+		}
+		body, err = override.Apply(body, flat)
+		if err != nil {
+			t.Fatalf("顺序应用失败（%s %s）: %v", op.Mode, op.Path, err)
+		}
+	}
+	return body
+}
+
+// TestTransformParamOverrideOrderRejects 顺序等价性守卫反例：归桶后语义漂移的
+// 序列必须硬失败（错误信息说明不可等价），绝不静默产出错误语义的扁平 ops。
+// 覆盖评审指出的四类反转/丢失样例 + delete 收尾复活样例。
+func TestTransformParamOverrideOrderRejects(t *testing.T) {
+	cases := map[string]string{
+		// 反转类 1：set→delete——旧语义 X 被删，扁平会 delete→set 使其复活。
+		"set后delete反转": `{"mode":"advanced","operations":[
+			{"mode":"set","path":"x","value":1},{"mode":"delete","path":"x"}]}`,
+		// 丢失类 2：同 path 两次 append——归桶 map 仅留最后一个，前值丢失。
+		"append多次丢失": `{"mode":"advanced","operations":[
+			{"mode":"append","path":"a","value":"A"},{"mode":"append","path":"a","value":"B"}]}`,
+		// 丢失类 3：同 path 链式 replace——归桶仅留最后一个改写，前段丢失。
+		"replace链丢失": `{"mode":"advanced","operations":[
+			{"mode":"replace","path":"m","old":"x","new":"y"},
+			{"mode":"replace","path":"m","old":"y","new":"z"}]}`,
+		// 反转类 4：append→set——旧语义最终为 set 值，扁平为 set 后再 append。
+		"append后set反转": `{"mode":"advanced","operations":[
+			{"mode":"append","path":"a","value":"A"},{"mode":"set","path":"a","value":"S"}]}`,
+		// 补充：delete 之后的 set 又被 delete 收尾——prefix 的 set 类别在 tail 缺失，
+		// 扁平化为 delete→set 后 X 复活，与旧语义（最终被删）相反。
+		"delete收尾复活": `{"mode":"advanced","operations":[
+			{"mode":"delete","path":"x"},{"mode":"set","path":"x","value":1},{"mode":"delete","path":"x"}]}`,
+	}
+	for name, raw := range cases {
+		got, err := TransformParamOverride(raw)
+		if err == nil {
+			t.Fatalf("%s 应硬失败，实际产出: %s", name, got)
+		}
+		if !strings.Contains(err.Error(), "不可等价") {
+			t.Fatalf("%s 错误信息应说明不可等价: %v", name, err)
+		}
+	}
+}
+
+// TestTransformParamOverrideOrderRejectsMixedPath 多 path 混合：仅一个 path 违规
+// 也必须整体硬失败（渠道行级拒绝，不做部分迁移）。
+func TestTransformParamOverrideOrderRejectsMixedPath(t *testing.T) {
+	raw := `{"mode":"advanced","operations":[
+		{"mode":"delete","path":"clean"},{"mode":"set","path":"clean","value":true},
+		{"mode":"set","path":"bad","value":1},{"mode":"delete","path":"bad"}]}`
+	got, err := TransformParamOverride(raw)
+	if err == nil {
+		t.Fatalf("混合 path 中 bad 违规应整体硬失败，实际产出: %s", got)
+	}
+	if !strings.Contains(err.Error(), `"bad"`) {
+		t.Fatalf("错误信息应指出违规 path: %v", err)
+	}
+}
+
+// TestTransformParamOverrideOrderAllows 可等价放行样例：迁移成功（产物经内置
+// override.Parse 自校验），且扁平产物在真实 hui 管道上的应用结果与旧 envelope
+// 顺序语义逐字节一致（语义级等价验证，非仅结构校验）。
+func TestTransformParamOverrideOrderAllows(t *testing.T) {
+	cases := map[string]string{
+		// delete→set（实测旧库 #3/#4 的真实序列）。
+		"delete后set": realEnvelope,
+		// delete 后重新开始：prefix set 被 tail set 覆盖，等价 delete→set。
+		"set-delete-set": `{"mode":"advanced","operations":[
+			{"mode":"set","path":"x","value":1},{"mode":"delete","path":"x"},
+			{"mode":"set","path":"x","value":2}]}`,
+		// delete 后重新开始：prefix append 被 tail append 覆盖，等价 delete→append。
+		"append-delete-append": `{"mode":"advanced","operations":[
+			{"mode":"append","path":"p","value":"A"},{"mode":"delete","path":"p"},
+			{"mode":"append","path":"p","value":"B"}]}`,
+		// 同 path 各类严格顺序单次（set→append→replace→regex_replace）。
+		"同类严格顺序": `{"mode":"advanced","operations":[
+			{"mode":"set","path":"p","value":"v"},{"mode":"append","path":"p","value":"a"},
+			{"mode":"replace","path":"p","old":"v","new":"w"},
+			{"mode":"regex_replace","path":"p","pattern":"a","replacement":"b"}]}`,
+		// 纯多次 delete：幂等无害。
+		"多次delete": `{"mode":"advanced","operations":[
+			{"mode":"delete","path":"a"},{"mode":"delete","path":"a"}]}`,
+	}
+	body := []byte(`{"x":0,"p":"seed","a":[1],"m":"x,y","thinking":{"type":"disabled"}}`)
+	for name, raw := range cases {
+		got, err := TransformParamOverride(raw)
+		if err != nil {
+			t.Fatalf("%s 应放行: %v", name, err)
+		}
+		if _, err := override.Parse(got); err != nil {
+			t.Fatalf("%s 产物应可被 override.Parse 解析: %v", name, err)
+		}
+		// 语义等价：旧顺序语义模拟执行 vs 扁平产物单次应用，结果必须逐字节一致。
+		want := applyEnvelopeInOrder(t, body, raw)
+		have, err := override.Apply(body, got)
+		if err != nil {
+			t.Fatalf("%s 扁平产物应用失败: %v", name, err)
+		}
+		if string(have) != string(want) {
+			t.Fatalf("%s 语义漂移:\n 旧顺序语义 %s\n 扁平产物   %s", name, want, have)
+		}
+	}
+}
+
 // ---- channels ----
 
 func TestTransformChannelOpenAICompat(t *testing.T) {

@@ -284,6 +284,10 @@ type legacyOverrideOp struct {
 // TransformParamOverride 把旧 envelope+operations 高级格式变换为 hui override 管道的
 // 扁平 ops JSON（{"delete":[...],"set":{...},...}）。空输入返回空串。
 // 非 envelope 格式、未知操作 mode、非法正则一律硬失败。
+// 顺序语义守卫：旧 envelope 按数组顺序执行，而 hui 扁平 ops 对同一 path 只能按
+// 固定顺序（delete→set→append→replace→regex_replace）且同桶同 path 仅保留最后
+// 一次出现的值；凡同 path 操作序列与固定顺序不可等价（归桶后语义漂移）即硬失败
+// 该行（checkParamOverrideOrder），与"未知 op 硬失败"同一处置原则，绝不静默猜测。
 // 产物经 override.Parse 反解析自校验，保证 hui 运行时管道可解析。
 func TransformParamOverride(raw string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
@@ -299,6 +303,9 @@ func TransformParamOverride(raw string) (string, error) {
 	}
 	if env.Operations == nil {
 		return "", fmt.Errorf("advanced envelope 缺少 operations 字段")
+	}
+	if err := checkParamOverrideOrder(*env.Operations); err != nil {
+		return "", err
 	}
 	ops := &override.Ops{
 		Set:          map[string]any{},
@@ -355,6 +362,114 @@ func TransformParamOverride(raw string) (string, error) {
 		return "", fmt.Errorf("扁平 ops 自校验失败: %w", err)
 	}
 	return string(out), nil
+}
+
+// checkParamOverrideOrder 对 envelope operations 做顺序等价性检查（按 path 分组，
+// 组内保持数组顺序）：任一 path 的操作序列与 hui 扁平 ops 固定执行顺序不可等价
+// 即返回错误（硬失败该渠道行，计入报告失败清单人工复核）。按 path 首次出现顺序
+// 检查并报告首个违规 path，保证错误信息确定性。未知 mode 在此放行——由后续归桶
+// 循环按"未知 op 硬失败"处置，避免错误信息错位。
+func checkParamOverrideOrder(ops []legacyOverrideOp) error {
+	order := []string{}
+	byPath := map[string][]legacyOverrideOp{}
+	for _, op := range ops {
+		p := strings.TrimSpace(op.Path)
+		if _, ok := byPath[p]; !ok {
+			order = append(order, p)
+		}
+		byPath[p] = append(byPath[p], op)
+	}
+	for _, p := range order {
+		if !paramOverrideOrderEquivalent(byPath[p]) {
+			return fmt.Errorf("path %q 的操作序列与扁平 ops 固定执行顺序（delete→set→append→replace→regex_replace）不可等价，归桶后语义漂移，需人工复核", p)
+		}
+	}
+	return nil
+}
+
+// paramOverrideOrderEquivalent 判定单个 path 上的旧操作序列（按数组顺序）归桶为
+// 扁平 ops 后是否语义等价（保守充分条件；纯函数便于单测）。
+//
+// 等价性论证：
+// 扁平 ops 对同一 path 的执行序列恒为 delete×m（幂等）→ set? → append? → replace? →
+// regex_replace?，且同桶同 path 仅保留最后一次出现的值；旧 envelope 对同一 path
+// 严格按数组顺序执行。设该 path 序列中最后一个 delete 位于位置 j：delete 仅幂等
+// 移除字段，此前各操作均为对该 path 的纯写（无跨字段副作用），故旧语义最终效果 ≡
+// 从"path 不存在"状态起执行 j 之后的子序列 T。扁平语义最终效果 ≡ 从"path 不存在"
+// 状态起（delete 先行清场）执行全部非 delete 操作按固定顺序的归桶结果。两者等价的
+// 保守充分条件：
+//
+//	a) T 匹配 set?→append?→replace?→regex_replace?（每类至多一次且相对顺序严格）
+//	   ——此时归桶不丢失不重排任何操作，T 的原序执行与归桶执行为同一操作序列；
+//	b) 最后 delete 之前的每个非 delete 操作，其类别都在 T 中再次出现——归桶同桶
+//	   覆盖使其不进入执行序列；若某类别缺失，该操作将在 delete 之后额外执行一次
+//	   造成语义偏移（如 [set X, delete X] 被扁平为 delete→set 使已删字段复活）。
+//
+// 条件不满足时可能仍存在个别等价巧合（如同 path 多次 set 的覆盖折叠），但静态
+// 判定复杂且有风险（如 replace 链式应用次数不可静态确定），统一硬失败人工复核。
+func paramOverrideOrderEquivalent(ops []legacyOverrideOp) bool {
+	lastDelete := -1
+	for i := range ops {
+		if ops[i].Mode == "delete" {
+			lastDelete = i
+		}
+	}
+	// prefixRanks：最后 delete 之前各非 delete 操作的类别；tail：最后 delete 之后的
+	// 子序列（无 delete 时即全序列，此时 prefixRanks 恒空）。
+	prefixRanks := map[int]bool{}
+	for i := 0; i < lastDelete; i++ {
+		if ops[i].Mode == "delete" {
+			continue
+		}
+		r, ok := overrideOpRank(ops[i].Mode)
+		if !ok {
+			return true // 未知 mode：交给归桶循环硬失败，顺序检查放行
+		}
+		prefixRanks[r] = true
+	}
+	tail := ops
+	if lastDelete >= 0 {
+		tail = ops[lastDelete+1:]
+	}
+	prev := -1
+	tailRanks := map[int]bool{}
+	for _, op := range tail {
+		r, ok := overrideOpRank(op.Mode)
+		if !ok {
+			return true // 未知 mode：交给归桶循环硬失败，顺序检查放行
+		}
+		if r <= prev { // 违反每类至多一次且相对顺序严格（条件 a）
+			return false
+		}
+		prev = r
+		tailRanks[r] = true
+	}
+	for r := range prefixRanks { // 条件 b：前置操作类别必须被 tail 同类覆盖
+		if !tailRanks[r] {
+			return false
+		}
+	}
+	return true
+}
+
+// overrideOpRank 返回操作类别在 hui 扁平 ops 固定执行顺序中的序号
+// （delete=0 → set=1 → append=2 → replace=3 → regex_replace=4，对齐 override.Apply）；
+// 未知 mode 返回 false（顺序检查放行，归桶循环硬失败）。
+func overrideOpRank(mode string) (int, bool) {
+	switch mode {
+	case "delete":
+		return 0, true
+	case "set":
+		return 1, true
+	case "append":
+		return 2, true
+	case "replace":
+		return 3, true
+	case "regex_replace":
+		return 4, true
+	default:
+		return 0, false
+	}
 }
 
 // ---- redemptions ----
