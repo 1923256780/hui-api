@@ -16,6 +16,7 @@ import (
 	"github.com/1923256780/hui-api/internal/config"
 	"github.com/1923256780/hui-api/internal/model"
 	"github.com/1923256780/hui-api/internal/override"
+	"github.com/1923256780/hui-api/internal/ratelimit"
 	"github.com/1923256780/hui-api/internal/relay"
 	"github.com/1923256780/hui-api/internal/store"
 )
@@ -45,6 +46,7 @@ type Gateway struct {
 	price   *billing.Engine         // 计费引擎（价格解析与三模式求值）
 	ledger  *billing.Ledger         // 预扣费账本（冻结/多退少补/退款）
 	logs    *billing.AsyncLogWriter // 请求日志异步批量落库
+	rl      *ratelimit.Limiter      // 请求/令牌限流（滑动窗口，M2-wave1）
 }
 
 // New 构造网关。pricer 为已通过内置价单校验的计费引擎（main 启动时 fail-fast 构造）。
@@ -65,6 +67,7 @@ func New(st *store.Store, rt *config.Runtime, pricer *billing.Engine) *Gateway {
 		price:  pricer,
 		ledger: billing.NewLedger(st),
 		logs:   billing.NewAsyncLogWriter(st),
+		rl:     ratelimit.New(nil),
 	}
 }
 
@@ -113,6 +116,14 @@ func (g *Gateway) Serve(c *gin.Context, proto relay.Protocol) {
 		return
 	}
 
+	// ---- 1.5 令牌级 IP 白名单（M2-wave1）：非空时客户端 IP 必须命中；
+	// 鉴权后立即拒绝，不读请求体。客户端 IP 无法解析时从严拒绝。
+	if !tokenAllowsIP(tok, c.ClientIP()) {
+		log.Printf("[relay] 令牌 %d IP 白名单拒绝: %s", tok.ID, c.ClientIP())
+		proto.WriteError(c, http.StatusForbidden, "token_ip_forbidden", "客户端 IP 不在令牌白名单内")
+		return
+	}
+
 	// ---- 2. pre-call：请求体大小限制（本地快速失败，不触上游）。
 	raw, err := io.ReadAll(io.LimitReader(c.Request.Body, g.maxBodyBytes()+1))
 	if err != nil {
@@ -135,6 +146,35 @@ func (g *Gateway) Serve(c *gin.Context, proto relay.Protocol) {
 		return
 	}
 
+	// ---- 3.5 令牌级模型白名单（M2-wave1）：非空时请求模型必须命中。
+	if !tokenAllowsModel(tok, pr.Model) {
+		log.Printf("[relay] 令牌 %d 模型白名单拒绝: %s", tok.ID, pr.Model)
+		proto.WriteError(c, http.StatusForbidden, "token_model_forbidden", "模型不在令牌可用清单内")
+		return
+	}
+
+	// ---- 3.6 限流（M2-wave1）：令牌级 TPM/RPM + 全局/分组请求限流，
+	// 超限 429 + Retry-After。限流在计费预扣之前：被拒请求无计费副作用；
+	// 本机限流发生在渠道选择之前，不计入上游熔断（避免把自家限流算进上游健康度）。
+	tokLim, _ := parseTPMRPM(tok.TPMRPM)
+	if tokLim.TPM > 0 || tokLim.RPM > 0 {
+		if allowed, retry := g.rl.AllowTokens(tokenLimitKey(tok.ID), tokLim.TPM, tokLim.RPM); !allowed {
+			log.Printf("[ratelimit] 令牌 %d TPM/RPM 超限 tpm=%d rpm=%d", tok.ID, tokLim.TPM, tokLim.RPM)
+			writeRateLimited(c, proto, retry)
+			return
+		}
+	}
+	reqCfg := g.requestLimitConfig(tokenGroup(tok))
+	reqLimitKey := ""
+	if reqCfg.Enabled {
+		reqLimitKey = reqCfg.Scope + "|" + c.ClientIP()
+		if allowed, retry := g.rl.AllowRequest(reqLimitKey, reqCfg.Window, reqCfg.MaxRequests, reqCfg.MaxSuccess); !allowed {
+			log.Printf("[ratelimit] 请求限流超限 scope=%s window=%s", reqCfg.Scope, reqCfg.Window)
+			writeRateLimited(c, proto, retry)
+			return
+		}
+	}
+
 	// ---- 4. 计费预检：解析价格快照；未配价显式拒绝（docs/04 第五节）。
 	price, err := g.price.LookupPrice(pr.Model)
 	if err != nil {
@@ -150,7 +190,8 @@ func (g *Gateway) Serve(c *gin.Context, proto relay.Protocol) {
 
 	// ---- 5. 预扣冻结：估算上浮 20%，事务内条件扣减防透支（docs/04 第三节）。
 	// unlimited 令牌跳过账本（frozen=0）。价格快照全请求复用，热更不影响在途请求口径。
-	group := billing.DefaultGroup
+	// 令牌分组（M2-wave1）：tokens.group → GroupRatio 组倍率与分组限流归属（缺省 default）。
+	group := tokenGroup(tok)
 	frozen := int64(0)
 	if !tok.UnlimitedQuota {
 		frozen = g.price.Estimate(price, group, raw, extractMaxTokens(raw))
@@ -299,6 +340,14 @@ func (g *Gateway) Serve(c *gin.Context, proto relay.Protocol) {
 		if respErr != nil {
 			log.Printf("[relay] 渠道 %d 响应转发失败 model=%s: %v", ch.ID, pr.Model, respErr)
 		}
+		// 限流记账（M2-wave1）：成功完成计入全局/分组成功数窗口；
+		// 实际用量计入令牌 TPM 窗口（流中断不计成功，用量照记——已发生即已消耗）。
+		if respErr == nil && reqLimitKey != "" {
+			g.rl.RecordSuccess(reqLimitKey, reqCfg.Window)
+		}
+		if tokLim.TPM > 0 {
+			g.rl.RecordTokenUsage(tokenLimitKey(tok.ID), usage.PromptTokens+usage.CompletionTokens)
+		}
 		actual, d := g.settle(tok, price, group, frozen, raw, c, usage, respErr)
 		detail = d
 		settled = true
@@ -319,10 +368,10 @@ func (g *Gateway) settle(tok *model.Token, price *billing.ModelPrice, group stri
 	frozen int64, raw []byte, c *gin.Context, usage relay.Usage, respErr error) (int64, billing.Detail) {
 
 	detail := billing.Detail{
-		Mode:      string(price.Mode),
-		Expr:      price.Expr,
-		Frozen:    frozen,
-		Unlimited: tok.UnlimitedQuota,
+		Mode:       string(price.Mode),
+		Expr:       price.Expr,
+		Frozen:     frozen,
+		Unlimited:  tok.UnlimitedQuota,
 		GroupRatio: g.price.GroupRatio(group),
 	}
 	if price.Mode == billing.ModeClassicRatio {
