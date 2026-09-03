@@ -144,7 +144,7 @@ func TestSmokeDualProtocol(t *testing.T) {
 	}
 
 	// 本地起服务（与 run() 相同的完整路由）。
-	engine, gw, err := newRouter(st, rt, schemaVersion)
+	engine, gw, err := newRouter(st, rt, schemaVersion, "smoke-secret")
 	if err != nil {
 		t.Fatalf("组装路由失败: %v", err)
 	}

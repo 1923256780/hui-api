@@ -21,6 +21,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/1923256780/hui-api/internal/api"
 	"github.com/1923256780/hui-api/internal/billing"
 	"github.com/1923256780/hui-api/internal/config"
 	"github.com/1923256780/hui-api/internal/gateway"
@@ -112,7 +113,7 @@ func run(addrOverride, configPath string) error {
 	defer dispatcher.Stop(3 * time.Second)
 
 	// 5. 路由 + 前端 SPA。
-	engine, gw, err := newRouter(st, rt, schemaVersion)
+	engine, gw, err := newRouter(st, rt, schemaVersion, cfg.SessionSecret)
 	if err != nil {
 		return fmt.Errorf("组装路由: %w", err)
 	}
@@ -147,10 +148,11 @@ func run(addrOverride, configPath string) error {
 	return nil
 }
 
-// newRouter 组装路由：/health 健康检查、/api/status 状态端点与转发面 /v1/*。
-// 剩余管理面端点在 M3 逐波挂接。计费引擎在此构造（内置价单启动校验，schema
-// 非法时 fail-fast 拒绝启动），同时返回 Gateway 供调用方停机时排空异步日志。
-func newRouter(st *store.Store, rt *config.Runtime, schemaVersion int64) (*gin.Engine, *gateway.Gateway, error) {
+// newRouter 组装路由：/health 健康检查、/api/status 状态端点、转发面 /v1/* 与
+// 管理面 /api（M2-wave1：root 引导 + 会话 + CRUD）。计费引擎在此构造（内置价单
+// 启动校验，schema 非法时 fail-fast 拒绝启动），同时返回 Gateway 供调用方停机时
+// 排空异步日志。sessionSecret 为会话 cookie 签名密钥（run() 已保证非空）。
+func newRouter(st *store.Store, rt *config.Runtime, schemaVersion int64, sessionSecret string) (*gin.Engine, *gateway.Gateway, error) {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -185,6 +187,13 @@ func newRouter(st *store.Store, rt *config.Runtime, schemaVersion int64) (*gin.E
 	v1.POST("/messages", func(c *gin.Context) { gw.Serve(c, anthropic.New()) })
 	v1.POST("/messages/count_tokens", func(c *gin.Context) { gw.Serve(c, anthropic.New()) })
 	v1.GET("/models", gw.HandleModels)
+
+	// 管理面（M2-wave1，docs/05）：先保证 root 存在（幂等），再挂会话与 /api CRUD。
+	if _, err := api.EnsureRootUser(st); err != nil {
+		return nil, nil, fmt.Errorf("引导 root 用户: %w", err)
+	}
+	sess := api.NewSessionManager([]byte(sessionSecret))
+	api.New(st, rt, gw, sess).Register(r)
 	return r, gw, nil
 }
 

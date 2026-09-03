@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -14,8 +15,10 @@ import (
 )
 
 // newTestRouter 用临时库构造与 run() 相同的路由，固化 /health 与 /api/status 契约。
+// 固定 root 口令环境变量，避免依赖开发机全局设置。
 func newTestRouter(t *testing.T) *gin.Engine {
 	t.Helper()
+	t.Setenv("HUI_API_ROOT_PASSWORD", "test-root-pw")
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("打开测试库失败: %v", err)
@@ -29,7 +32,7 @@ func newTestRouter(t *testing.T) *gin.Engine {
 	if err != nil {
 		t.Fatalf("构造 Runtime 失败: %v", err)
 	}
-	eng, gw, err := newRouter(st, rt, schemaVersion)
+	eng, gw, err := newRouter(st, rt, schemaVersion, "test-secret")
 	if err != nil {
 		t.Fatalf("组装路由失败: %v", err)
 	}
@@ -91,6 +94,33 @@ func TestStatusEndpoint(t *testing.T) {
 	}
 	if body.Data.ConfigVersion < 1 {
 		t.Fatalf("data.config_version 应 >=1（首次加载），实际 %d", body.Data.ConfigVersion)
+	}
+}
+
+// TestAdminPlaneMounted 完整装配下管理面可用：root 可登录并取得会话 cookie；
+// 未登录访问管理端点 401（RequireRoot 生效）。
+func TestAdminPlaneMounted(t *testing.T) {
+	r := newTestRouter(t)
+
+	// 未登录 → 401。
+	req := httptest.NewRequest(http.MethodGet, "/api/channel", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("未登录访问 /api/channel 应 401，实际 %d", rec.Code)
+	}
+
+	// root 登录 → 200 + Set-Cookie。
+	login := httptest.NewRequest(http.MethodPost, "/api/user/login",
+		strings.NewReader(`{"username":"root","password":"test-root-pw"}`))
+	login.Header.Set("Content-Type", "application/json")
+	rec2 := httptest.NewRecorder()
+	r.ServeHTTP(rec2, login)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("root 登录应 200，实际 %d body=%s", rec2.Code, rec2.Body.String())
+	}
+	if !strings.HasPrefix(rec2.Header().Get("Set-Cookie"), "session=") {
+		t.Fatalf("登录响应应携带 session cookie: %q", rec2.Header().Get("Set-Cookie"))
 	}
 }
 
