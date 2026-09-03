@@ -3,6 +3,7 @@ package gateway
 import (
 	"errors"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -47,11 +48,16 @@ func (a *atomicInt64) Store(v int64) {
 	a.v = v
 }
 
+// seedTokenSeq 令牌明文 key 的进程内唯一序号：Windows 系统时钟粒度可达 0.5-15ms，
+// 快速连续两次 seedToken（newTestGateway 内置一次 + 测试体一次）可能得到完全相同
+// 的 Format 纳秒输出，导致同库 UNIQUE 冲突（CI/Linux 高精度时钟不复现）。
+var seedTokenSeq atomic.Int64
+
 // seedToken 写入测试令牌并返回明文。默认 unlimited（编排级既有测试不依赖账本）；
 // 计费链路测试用 mutate 覆盖为带余额令牌（见 billing_test.go）。
 func seedToken(t *testing.T, st *store.Store, mutate func(*model.Token)) string {
 	t.Helper()
-	plain := "sk-test-" + time.Now().Format("150405.000000000")
+	plain := "sk-test-" + time.Now().Format("150405.000000000") + "-" + strconv.Itoa(int(seedTokenSeq.Add(1)))
 	tok := &model.Token{
 		UserID: 1, Name: "t", Key: plain, KeyHash: HashKey(plain),
 		Status: model.StatusEnabled, ExpiredTime: model.EpochForever,
