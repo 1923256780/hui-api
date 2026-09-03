@@ -9,6 +9,32 @@
 
 ### 新增
 
+- M2-wave1 管理面 API：登录会话（`POST /api/user/login`/`logout`，golang.org/x/crypto/bcrypt 校验，
+  HMAC-SHA256 签名 cookie HttpOnly+SameSite=Lax TTL 7d，`users.auth_version` 纳入中间件比对、
+  改密递增即失效旧会话；root 引导幂等，口令经 HUI_API_ROOT_PASSWORD 注入或缺省 123456）；
+  管理中间件区分 root（role=100）/普通角色，管理端点全部 root 权限；
+- M2-wave1 管理 CRUD 六组端点（整对象幂等写，PUT 全量覆盖不丢字段）：`/api/channel`（分页/单个
+  key 脱敏回显/创建/更新/删除 + `POST /api/channel/test/:id` 连通测试返回 status_code/time_ms，
+  写后 Breaker.Reset 复位熔断）；`/api/token`（明文 sk-+32hex 仅创建响应返回一次，remain 缺省
+  =quota，group 缺省取用户分组再退 default，写后 Auth().Invalidate 失效鉴权缓存）；`/api/user`
+  （用户名唯一 409；改密 bcrypt+auth_version 递增；root 防自锁不可自改 role/status；删除用户
+  级联删令牌并逐个失效缓存）；`/api/redemption`（批量生成 count 1..100、key redd-+24hex 冲突
+  重试、列表/删除；核销状态机属 wave3）；`/api/log`（分页 + user/token/channel/model/时间过滤，
+  id 降序）；`/api/option`（GET 全部/PUT 批量写，键白名单拒 schema_version，值长 ≤2048，任一
+  非法整体拒绝，写后 Runtime.Reload() 热生效免重启并返回新版本号）；
+- M2-wave1 限流挂接 `internal/ratelimit`：手写滑动窗口（AllowRequest/RecordSuccess 与
+  AllowTokens/RecordTokenUsage 双入口；被拒不消耗配额；sync.Map 分桶 + idle TTL/LRU 淘汰）；
+  全局 ModelRequestRateLimit 语义（Enabled/DurationMinutes/Count/SuccessCount 行业通用键名）+
+  分组 JSON 覆盖（`{"组名":[最大请求数,最大成功数]}`，共用周期）；令牌 TPM/RPM 接入转发链路
+  （tpm_rpm JSON，超限 429 + Retry-After）；本机限流 429 不计入上游熔断失败计数（限流与熔断解耦）；
+- M2-wave1 令牌分组接 GroupRatio：token.group → GroupRatio 倍率传入 billing（M1-wave3 遗留项
+  清偿），组缺省 default→1.0；
+- M2-wave1 装配：main.newRouter 挂 EnsureRootUser（幂等）→ SessionManager →
+  api.Handler.Register；管理面与转发面共享同一 Gateway 实例（写后失效直达运行态）；
+- M2-wave1 测试：api 包 19 例（bcrypt 往返/会话签发校验/篡改拒绝/过期/引导幂等/登录登出/
+  auth_version 失效/403 与禁用/渠道 CRUD 幂等/连通测试/options 热更/令牌 key 一次性与缓存失效
+  联动/用户 CRUD 改密失效旧会话/防自锁/级联删除/兑换码批量/日志过滤）、gateway 限流 4 例
+  （窗口边界/分组覆盖/TPM/RPM）、cmd 管理面装配 1 例；`go test ./... -race` 全绿，vet 零告警。
 - M1-wave3 计费内核 `internal/billing`：三模式计费引擎——classic_ratio 倍率线性（`round((input + completion×completion_ratio) × model_ratio × group_ratio × 500000 / 1e6)`）、tiered_expr 表达式（github.com/expr-lang/expr，`tier("base", expr)` 单层语义，编译结果并发安全缓存，变量 p=纯输入/c=输出/cr=缓存读（原始 tokens 数），表达式值 micro-USD，不叠乘组倍率）、per_call 按次（固定价 × group_ratio × 500000）；quota = round(计费值 × 500000 / 1e6)；未配价模型显式拒绝（HTTP 503 `model_not_priced`，配置声明不完整视为未配价）。
 - M1-wave3 价格单源：内置 `internal/billing/prices.json`（go:embed 打包，含版本号）；启动校验 schema（模式枚举、数值非负、表达式编译 + 零用量试求值）；价格查找顺序 options 显式声明 > `ModelRatio` 隐式 classic > 内置价单 > 拒绝服务；LookupPrice 返回不可变 ModelPrice 快照，单请求生命周期复用（防预扣与结算间配置热更导致口径漂移）。
 - M1-wave3 预扣费账本 `internal/billing/ledger.go`：Estimate 预扣估算（输入按请求体字节/4 粗估 + max_tokens 缺省 1024，计费后上浮 20%，最低 1 quota）；Freeze 事务内条件 UPDATE `WHERE remain_quota >= delta` 防透支（RowsAffected=0 → `ErrInsufficientQuota`，映射 403）；Settle 多退少补（差额 = 冻结 − 实结，补扣允许透支到负数）；RefundFull 全额退款；users.quota 与 tokens.remain_quota 同步扣减；unlimited 令牌三级跳过（冻结/结算/退款）。
@@ -36,6 +62,7 @@
 
 ### 文档
 
+- M2-wave1：docs/05 新增第五节管理面契约（通用约定/端点明细/错误码表/限流契约）；docs/01 目录结构与落地进度同步（internal/api、internal/ratelimit）；docs/10 ROADMAP 拆 M2 三波、状态块重写与新增交接记录五条；docs/11 踩坑追加三条；新增 ADR 0005（会话鉴权标准化与限流挂接解耦：bcrypt 用 x/crypto、HMAC cookie、手写滑动窗口、整对象幂等写）。
 - M1-wave3：docs/01 设计点 4 落地标注与目录结构同步；docs/04 落地标注 + 新增「公式实测」节（四条黄金样例数值对齐）；docs/05 错误码表补 403/503 计费语义与计费运行轨键；docs/10 ROADMAP 重排（M1 完成、M2 重定义管理面 API）与状态块重写；docs/11 踩坑追加；新增 ADR 0004（计费引擎落地：expr 选型与 tier 单层语义）。
 - M1-wave2：docs/01 设计点 2/3 落地标注与目录结构同步（internal/channel 落地为 internal/gateway）；docs/05 转发面契约细化（请求/响应示例与错误码表）；docs/11 踩坑追加两条；docs/10 状态块与交接记录更新。
 - 新增 ADR 0003（存储层落地：单写多读与原子快照热更）；docs/01、docs/03 同步落地状态与实现细节；docs/02 补充 build.ps1 目标说明；docs/11 踩坑记录追加三条。
