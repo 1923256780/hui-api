@@ -23,6 +23,8 @@ export interface SessionUser {
   username: string
   display_name?: string
   role: number
+  email?: string
+  totp_enabled?: boolean // M3-wave2：GET /api/user/self 完整返回，登录响应不含此字段
 }
 
 const SESSION_KEY = 'hui-session'

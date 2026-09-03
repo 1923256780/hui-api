@@ -4,6 +4,7 @@
 // 误判为会话失效（docs/11 守卫探针教训）。401 由 api 客户端统一跳转登录页。
 // 菜单按角色渲染：渠道/用户/兑换码/系统设置为 root 专属，普通用户仅见
 // 自视页面；直访 root 专属路径时回看板（防御 URL 直达）。
+// M3-wave2：新增个人中心 /console/profile（全角色可见，docs/05 §5.9）。
 import { useEffect, useState } from 'react'
 import { App, Avatar, Button, Layout, Menu, Typography } from 'antd'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
@@ -27,11 +28,12 @@ const { Text } = Typography
 
 export const menuItems = [
   { key: '/console', icon: <DashboardOutlined />, label: '数据看板' },
-  { key: '/console/channels', icon: <CloudServerOutlined />, label: '渠道' },
   { key: '/console/tokens', icon: <KeyOutlined />, label: '令牌' },
+  { key: '/console/topup', icon: <WalletOutlined />, label: '充值' },
+  { key: '/console/profile', icon: <UserOutlined />, label: '个人中心' },
+  { key: '/console/channels', icon: <CloudServerOutlined />, label: '渠道' },
   { key: '/console/users', icon: <TeamOutlined />, label: '用户' },
   { key: '/console/redemptions', icon: <GiftOutlined />, label: '兑换码' },
-  { key: '/console/topup', icon: <WalletOutlined />, label: '充值' },
   { key: '/console/logs', icon: <FileTextOutlined />, label: '日志' },
   { key: '/console/models', icon: <AppstoreOutlined />, label: '模型广场' },
   { key: '/console/settings', icon: <SettingOutlined />, label: '系统设置' },

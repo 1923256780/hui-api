@@ -63,6 +63,7 @@ export interface UserInfo {
   group: string
   created_time: number
   last_login_time: number
+  totp_enabled?: boolean // M3-wave2：两步验证开关（GET /api/user/self 顺带返回）
 }
 
 export interface Redemption {
@@ -123,4 +124,34 @@ export interface UserStats {
   tokens: number // prompt + completion 汇总
   quota: number
   models: UserStatsModelRow[] // 按 quota 降序，上限 100 行
+}
+
+// ===== M3-wave2：注册能力发现 / OAuth 身份 / TOTP（docs/05 §5.8-§5.9）=====
+
+// GET /api/setup 能力发现：注册页与登录页据此渲染开关与 OAuth 按钮。
+export interface SetupData {
+  register_enabled: boolean
+  email_verification: boolean
+  turnstile_site_key: string // 空 = 未启用人机校验
+  oauth: {
+    github: boolean
+    linuxdo: boolean
+    oidc: boolean
+  }
+}
+
+// GET /api/user/identities 条目：本人已绑定的第三方身份列表。
+export interface UserIdentityView {
+  id: number
+  user_id: number
+  provider: string // github | linuxdo | oidc
+  provider_uid: string
+  created_time: number
+}
+
+// POST /api/user/totp/setup 返回：secret 供手动录入，otpauth_uri 供扫码
+//（前端以文本+链接展示，不引二维码库）。
+export interface TOTPSetupData {
+  secret: string
+  otpauth_uri: string
 }
