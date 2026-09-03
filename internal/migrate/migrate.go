@@ -30,6 +30,16 @@ import (
 // ErrReconMismatch 是内置对账不一致的哨兵错误（可用 errors.Is 判断）。
 var ErrReconMismatch = errors.New("内置对账不一致")
 
+// ErrLiveTarget 是目标库已有数据且未显式允许重跑时的哨兵错误
+// （errors.Is 判断；CLI 据此以退出码 3 退出）。
+var ErrLiveTarget = errors.New("目标库已有数据")
+
+// 目标库起始状态（报告 guard.target_state 取值；守卫未执行到时为空串）。
+const (
+	targetStateEmpty   = "empty"    // users/tokens 均为空：首次迁移或重置后迁移
+	targetStateHasData = "has_data" // users 或 tokens 已有数据：已有库
+)
+
 // legacyQuotaPerUnitDefault 是旧网关 QuotaPerUnit 的缺省值（未落库时），与 hui 口径一致。
 const legacyQuotaPerUnitDefault = int64(model.QuotaPerDollar)
 
@@ -51,6 +61,10 @@ const (
 type Options struct {
 	LegacyPath string // 旧库路径（只读打开，绝不写入）
 	TargetPath string // hui 库路径（读写打开；空库自动建表）
+	// AllowLiveTarget 目标库已有数据时强制放行（对应 CLI -allow-live-target）。
+	// 仅用于演练与救援场景：正常切换流程应先重置目标库（删除重建空库）再迁移，
+	// 空库天然放行；显式放行重跑意味着接受覆盖式同步对切换后数据的覆写。
+	AllowLiveTarget bool
 }
 
 // Run 执行完整迁移并返回报告。语义：
@@ -76,6 +90,11 @@ func Run(opts Options) (*Report, error) {
 	// 目标库 schema 就绪：空库自动建表；已有库幂等校验（GORM AutoMigrate 语义）。
 	if _, err := tgt.Migrate(); err != nil {
 		return nil, fmt.Errorf("目标库 schema 迁移失败: %w", err)
+	}
+
+	// 目标库状态守卫：必须先于任何 upsert（在旧库口径守卫之前，快速失败不依赖旧库内容）。
+	if err := targetGuard(tgt, opts, rep); err != nil {
+		return rep, err
 	}
 
 	if err := runGuard(ro, rep); err != nil {
@@ -116,6 +135,34 @@ func Run(opts Options) (*Report, error) {
 	return rep, nil
 }
 
+// targetGuard 目标库状态守卫：upsert 是覆盖式同步（users 覆盖 quota/password_hash/role，
+// tokens 覆盖 remain_quota/status，redemptions 覆盖 status/used_by），目标库已上线时
+// 误重跑会覆写切换后产生的用户余额/密码/已核销兑换码（已核销会复活可二次核销）。
+// 因此 users 或 tokens 非空即拒绝（exit 码 3），除非显式 AllowLiveTarget；守卫决策
+// 写入报告 guard.target_state（empty/has_data）与 guard.target_forced。与 runbook 对齐：
+// 正常切换步骤是“重置目标库（删除重建空库）后再迁”，空库天然放行，幂等重跑语义
+// 建立在空库起点之上。
+func targetGuard(tgt *store.Store, opts Options, rep *Report) error {
+	uc, err := scalar(tgt.Read, `SELECT COUNT(*) FROM users`)
+	if err != nil {
+		return fmt.Errorf("目标库守卫读取 users: %w", err)
+	}
+	tc, err := scalar(tgt.Read, `SELECT COUNT(*) FROM tokens`)
+	if err != nil {
+		return fmt.Errorf("目标库守卫读取 tokens: %w", err)
+	}
+	if uc == 0 && tc == 0 {
+		rep.Guard.TargetState = targetStateEmpty
+		return nil
+	}
+	rep.Guard.TargetState = targetStateHasData
+	if opts.AllowLiveTarget {
+		rep.Guard.TargetForced = true
+		return nil
+	}
+	return fmt.Errorf("%w：users=%d tokens=%d 非空，覆盖式重跑将破坏切换后数据（余额/密码/核销状态）；请先重置目标库（删除重建空库）再迁移，救援场景显式传 -allow-live-target", ErrLiveTarget, uc, tc)
+}
+
 // runGuard 前置守卫：旧库 QuotaPerUnit 未落库按缺省 500000 放行；显式配置必须等于
 // 500000，否则拒绝迁移（计费换算锚定该口径，漂移即错账）。
 func runGuard(ro *gorm.DB, rep *Report) error {
@@ -123,7 +170,9 @@ func runGuard(ro *gorm.DB, rep *Report) error {
 	if err != nil {
 		return err
 	}
-	rep.Guard = GuardReport{QuotaPerUnit: qpu, QuotaPerUnitIsDefault: isDefault}
+	// 逐字段填充：targetGuard 已先行写入目标库状态，禁止整体覆盖 rep.Guard。
+	rep.Guard.QuotaPerUnit = qpu
+	rep.Guard.QuotaPerUnitIsDefault = isDefault
 	effective := qpu
 	if isDefault {
 		effective = legacyQuotaPerUnitDefault

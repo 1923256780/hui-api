@@ -29,9 +29,14 @@ type Report struct {
 
 // GuardReport 是前置守卫结果。QuotaPerUnitIsDefault=true 表示旧库未落库该键，
 // 按旧网关缺省 500000 放行；false 表示旧库显式配置，值必须等于 500000 才能通过。
+// TargetState 记录目标库起始状态（empty=空库放行 / has_data=已有库；守卫未执行到
+// 时为空串），TargetForced=true 表示已有库经 -allow-live-target 强制放行
+// （guard 决策：empty=空库放行；has_data+forced=强制放行；has_data 未 forced=拒绝）。
 type GuardReport struct {
-	QuotaPerUnit          int64 `json:"quota_per_unit"`
-	QuotaPerUnitIsDefault bool  `json:"quota_per_unit_is_default"`
+	QuotaPerUnit          int64  `json:"quota_per_unit"`
+	QuotaPerUnitIsDefault bool   `json:"quota_per_unit_is_default"`
+	TargetState           string `json:"target_state"`
+	TargetForced          bool   `json:"target_forced"`
 }
 
 // RowFailure 是单行硬失败记录（该行未迁移，不影响其余行继续）。

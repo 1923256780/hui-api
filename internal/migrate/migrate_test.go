@@ -201,9 +201,12 @@ func TestRunMigratesAndReconciles(t *testing.T) {
 		t.Fatalf("换算口径标注错误: %q", rep.Options.ModelRatio.Conversion)
 	}
 
-	// 守卫：QuotaPerUnit 未落库按缺省放行。
+	// 守卫：QuotaPerUnit 未落库按缺省放行；空库起点守卫决策 empty。
 	if !rep.Guard.QuotaPerUnitIsDefault {
 		t.Fatalf("fixture 未落 QuotaPerUnit，应为缺省放行: %+v", rep.Guard)
+	}
+	if rep.Guard.TargetState != targetStateEmpty || rep.Guard.TargetForced {
+		t.Fatalf("空库起点守卫决策应为 empty/未强制: %+v", rep.Guard)
 	}
 
 	// 目标库内容断言。
@@ -304,7 +307,10 @@ func realEnvelopeFlat() string {
 	return got
 }
 
-// TestRunIdempotentRerun 幂等可重跑：第二遍迁移后目标库快照与报告 JSON 逐字节一致。
+// TestRunIdempotentRerun 幂等可重跑：重置目标库（删除重建空库，对齐 runbook
+// 切换步骤的重置语义）后第二遍迁移，目标库快照与报告 JSON 逐字节一致。
+// 同库不重置的重跑由目标库状态守卫拒绝（见 TestRunLiveTargetRejected），
+// 幂等覆盖式同步语义建立在空库起点之上。
 func TestRunIdempotentRerun(t *testing.T) {
 	dir := t.TempDir()
 	legacyPath, targetPath := dir+"/legacy.db", dir+"/hui.db"
@@ -323,6 +329,9 @@ func TestRunIdempotentRerun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("报告序列化失败: %v", err)
 	}
+
+	// 重置目标库：删除重建空库（WAL 模式连同 -wal/-shm 一并清理）。
+	resetTarget(t, targetPath)
 
 	rep2, err := runMigrate(t, legacyPath, targetPath)
 	if err != nil {
@@ -344,6 +353,78 @@ func TestRunIdempotentRerun(t *testing.T) {
 	}
 	if string(b1) != string(b2) {
 		t.Fatalf("两遍迁移报告应逐字节一致（确定性）:\n--- 第一遍 ---\n%s\n--- 第二遍 ---\n%s", b1, b2)
+	}
+}
+
+// resetTarget 重置目标库：删除库文件及 WAL 附属文件，下次打开即重建空库。
+func resetTarget(t *testing.T, path string) {
+	t.Helper()
+	for _, f := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("重置目标库失败（%s）: %v", f, err)
+		}
+	}
+}
+
+// TestRunLiveTargetRejected 目标库状态守卫：同库重跑（users/tokens 已有数据）
+// 拒绝（ErrLiveTarget），报告 guard 决策为 has_data/未强制，且既有数据零变化
+// （守卫在任何 upsert 之前）。
+func TestRunLiveTargetRejected(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath, targetPath := dir+"/legacy.db", dir+"/hui.db"
+	buildLegacyFixture(t, legacyPath, legacyFixtureSpec{})
+
+	if _, err := runMigrate(t, legacyPath, targetPath); err != nil {
+		t.Fatalf("首次迁移（空库起点）应放行: %v", err)
+	}
+	st1 := mustOpen(t, targetPath)
+	snap := dumpTarget(t, st1)
+	if err := st1.Close(); err != nil {
+		t.Fatalf("关闭目标库失败: %v", err)
+	}
+
+	rep, err := runMigrate(t, legacyPath, targetPath)
+	if !errors.Is(err, ErrLiveTarget) {
+		t.Fatalf("非空目标库重跑应拒绝（ErrLiveTarget），实际 err=%v", err)
+	}
+	if rep == nil || rep.OK {
+		t.Fatalf("拒绝时应返回非 OK 报告供人工排查: %+v", rep)
+	}
+	if rep.Guard.TargetState != targetStateHasData || rep.Guard.TargetForced {
+		t.Fatalf("guard 决策应为 has_data/未强制: %+v", rep.Guard)
+	}
+	if !strings.Contains(err.Error(), "-allow-live-target") {
+		t.Fatalf("错误信息应提示放行途径: %v", err)
+	}
+
+	// 守卫拒绝后目标库数据零变化。
+	st2 := mustOpen(t, targetPath)
+	defer func() { _ = st2.Close() }()
+	snap2 := dumpTarget(t, st2)
+	if strings.Join(snap, "\n") != strings.Join(snap2, "\n") {
+		t.Fatal("守卫拒绝后目标库数据不应有任何变化")
+	}
+}
+
+// TestRunLiveTargetForced -allow-live-target 显式放行：非空目标库强制重跑成功
+// （对齐覆盖式同步语义），guard 决策为 has_data+forced。
+func TestRunLiveTargetForced(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath, targetPath := dir+"/legacy.db", dir+"/hui.db"
+	buildLegacyFixture(t, legacyPath, legacyFixtureSpec{})
+
+	if _, err := runMigrate(t, legacyPath, targetPath); err != nil {
+		t.Fatalf("首次迁移应放行: %v", err)
+	}
+	rep, err := Run(Options{LegacyPath: legacyPath, TargetPath: targetPath, AllowLiveTarget: true})
+	if err != nil {
+		t.Fatalf("显式放行应成功: %v", err)
+	}
+	if !rep.OK {
+		t.Fatalf("强制重跑应 OK: %+v", rep)
+	}
+	if rep.Guard.TargetState != targetStateHasData || !rep.Guard.TargetForced {
+		t.Fatalf("guard 决策应为 has_data+forced: %+v", rep.Guard)
 	}
 }
 

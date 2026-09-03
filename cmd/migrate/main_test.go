@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,7 +21,7 @@ func TestRunLegacyMissing(t *testing.T) {
 	dir := t.TempDir()
 	legacy := filepath.Join(dir, "no-such.db")
 	reportPath := filepath.Join(dir, "report.json")
-	if err := run(legacy, filepath.Join(dir, "hui.db"), reportPath, ""); err == nil {
+	if err := run(legacy, filepath.Join(dir, "hui.db"), reportPath, "", false); err == nil {
 		t.Fatal("旧库不存在应失败")
 	}
 	if _, err := os.Stat(reportPath); !os.IsNotExist(err) {
@@ -46,7 +47,7 @@ func TestRunReportWrittenOnFailure(t *testing.T) {
 	}
 
 	reportPath := filepath.Join(dir, "report.json")
-	if err := run(legacy, filepath.Join(dir, "hui.db"), reportPath, ""); err == nil {
+	if err := run(legacy, filepath.Join(dir, "hui.db"), reportPath, "", false); err == nil {
 		t.Fatal("缺业务表的旧库应迁移失败")
 	}
 
@@ -67,6 +68,43 @@ func TestRunReportWrittenOnFailure(t *testing.T) {
 func TestPrintSummaryRobust(t *testing.T) {
 	printSummary(nil)
 	printSummary(&migrate.Report{})
+}
+
+// TestRunLiveTargetGuardFlag CLI 层目标库守卫：非空目标库未放行时 run 返回
+// ErrLiveTarget（main 据此 exit 3）；显式放行后不再返回该哨兵错误。
+// 旧库用空库即可：目标库守卫先于旧库口径守卫执行，非空目标库无论旧库内容均拒绝。
+func TestRunLiveTargetGuardFlag(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "legacy.db")
+	lg, err := store.Open(legacy)
+	if err != nil {
+		t.Fatalf("建旧库 fixture 失败: %v", err)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatalf("关闭旧库 fixture 失败: %v", err)
+	}
+	target := filepath.Join(dir, "hui.db")
+	tg, err := store.Open(target)
+	if err != nil {
+		t.Fatalf("建非空目标库失败: %v", err)
+	}
+	if _, err := tg.Migrate(); err != nil {
+		t.Fatalf("建表失败: %v", err)
+	}
+	if err := tg.Write.Create(&model.User{ID: 1, Username: "root", Quota: 100}).Error; err != nil {
+		t.Fatalf("造已上线数据失败: %v", err)
+	}
+	if err := tg.Close(); err != nil {
+		t.Fatalf("关闭目标库失败: %v", err)
+	}
+
+	if err := run(legacy, target, "", "", false); !errors.Is(err, migrate.ErrLiveTarget) {
+		t.Fatalf("未放行应返回 ErrLiveTarget，实际 err=%v", err)
+	}
+	// 显式放行后不再返回 ErrLiveTarget（空旧库在后续旧库口径守卫报其他错，与目标库守卫无关）。
+	if err := run(legacy, target, "", "", true); errors.Is(err, migrate.ErrLiveTarget) {
+		t.Fatalf("显式放行后不应返回 ErrLiveTarget，实际 err=%v", err)
+	}
 }
 
 // TestExportTokens 导出目标库令牌明文清单（TSV），行序按 id 升序。
