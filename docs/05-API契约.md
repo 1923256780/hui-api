@@ -126,7 +126,7 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 
 ### 5.1 通用约定
 
-- **鉴权**：除 `/api/user/login`、`/api/user/logout`、`/api/status` 外全部要求 root 会话（签名 cookie，缺失/篡改/过期/禁用/auth_version 不匹配 → 401/403）；例外：用户自服务组（`/api/user/topup`、`/api/user/self`、`/api/user/stats`、`/api/token/:id/assign`、`/api/token/mine`，及 M3-wave2 的 `/api/user/password`、`/api/user/email`、`/api/user/totp/*`、`/api/user/identities*`、`/api/oauth/:provider/bind`，及 M3-wave3 的 `/api/user/topup/order`、`/api/user/topup/orders`、`/api/user/aff`）仅要求登录态（RequireAuth，普通用户可访）；公开组（M3-wave1：`/api/setup`、`/api/user/register`、`/api/verification_code`、`/api/user/reset_password`；M3-wave2：`/api/oauth/:provider`、`/api/oauth/:provider/callback`、`/api/user/login/2fa`）无会话要求，安全边界由开关门控 + IP 限频 + 人机校验/验证码/state cookie 承担（见 5.7/5.8）；M3-wave3 支付回调（`/api/pay/epay/notify`、`/api/pay/epay/return`、`/api/pay/stripe/webhook`）无会话要求，安全边界由签名验签 + 金额逐位校验承担（见 5.10）。**半登录态（M3-wave2）**：TOTP 启用用户的 stage1 会话（Stage≠0）只能访问 `/api/user/login/2fa`，访问其他 RequireAuth 端点一律 401 `totp_required`（防半登录提权，见 5.9）。
+- **鉴权**：除 `/api/user/login`、`/api/user/logout`、`/api/status` 外全部要求 root 会话（签名 cookie，缺失/篡改/过期/禁用/auth_version 不匹配 → 401/403）；例外：用户自服务组（`/api/user/topup`、`/api/user/self`、`/api/user/stats`、`/api/token/:id/assign`、`/api/token/mine`，及 M3-wave2 的 `/api/user/password`、`/api/user/email`、`/api/user/totp/*`、`/api/user/identities*`、`/api/oauth/:provider/bind`，及 M3-wave3 的 `/api/user/topup/order`、`/api/user/topup/orders`、`/api/user/aff`，及 M3-wave4 的 `/api/log/mine`）仅要求登录态（RequireAuth，普通用户可访）；公开组（M3-wave1：`/api/setup`、`/api/user/register`、`/api/verification_code`、`/api/user/reset_password`；M3-wave2：`/api/oauth/:provider`、`/api/oauth/:provider/callback`、`/api/user/login/2fa`）无会话要求，安全边界由开关门控 + IP 限频 + 人机校验/验证码/state cookie 承担（见 5.7/5.8）；M3-wave3 支付回调（`/api/pay/epay/notify`、`/api/pay/epay/return`、`/api/pay/stripe/webhook`）无会话要求，安全边界由签名验签 + 金额逐位校验承担（见 5.10）。**半登录态（M3-wave2）**：TOTP 启用用户的 stage1 会话（Stage≠0）只能访问 `/api/user/login/2fa`，访问其他 RequireAuth 端点一律 401 `totp_required`（防半登录提权，见 5.9）。
 - **响应包裹**：成功 `{"success":true,"message":"","data":...}`，失败 `{"success":false,"message":"...","code":"语义码"}`；创建类返回 201，其余 200；连通测试结果语义不落库不影响熔断（HTTP 恒 200）。
 - **幂等写**：PUT 为整对象幂等替换——显式字段含零值全部生效，同 body 重复 PUT 响应体一致；缺省归一化：status 0→启用、token.expired_time 0→永久（`-1`）、group 空→`default`、user.role 0→普通用户；channel.key 空=保留旧值（唯一例外，防回显脱敏值覆盖明文）；token 的 key/key_hash/user_id 与 root 自身 role/status 不可经 PUT 修改。
 - **分页**：`?page=1&page_size=20`（page_size 上限 100），响应 `data.items/total/page/page_size`；列表排序：channel/option 按 id 升序或 key 字典序，token/redemption/log 按 id 降序。
@@ -155,6 +155,7 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 | `GET/POST/PUT/DELETE /api/token` | user_id 必填且存在；quota/remain/unlimited/budget_duration/tpm_rpm/tags/group/model_limits/allow_ips/expired_time | 创建响应 `data.key` 为明文（`sk-`+32hex）**仅此一次**；remain 缺省=quota；group 缺省取用户分组再退 default；写后鉴权缓存失效 |
 | `GET/POST/DELETE /api/redemption` | 批量生成 `{count:1..100,name,quota>0,expired_time}` | `data.keys` 明文数组（`redd-`+24hex）仅此一次；key 冲突自动重试，重试穷尽整批拒绝 |
 | `GET /api/log` | 过滤：`user_id/token_id/channel_id/model_name/start_timestamp/end_timestamp`（Unix 秒闭区间） | id 降序；channel_id 已生效（M2-wave3 日志回填实际服务渠道） |
+| `GET /api/log/mine` | `?page&page_size&model_name&start_timestamp&end_timestamp`（登录态） | 当前用户本人请求日志分页（id 降序）；所有权作用域强制取会话用户（user_id 查询参数被忽略）；响应为白名单字段（logMineView）——不含 user_id（会话即归属）与 channel_id（管理面路由语义），也不含令牌名/key 等密钥材料；M3-wave4 |
 | `GET/PUT /api/option` | PUT `{"options":{k:v}}` | 键白名单：`relay.*`/`billing_setting.*`/`hooks.*`/`smtp.*`/`register.*`/`oauth.*`/`turnstile.*`/`epay.*`/`stripe.*`/`aff.*`/`topup.*` 前缀 + `ModelRatio`/`CompletionRatio`/`GroupRatio`/`ModelRequestRateLimitEnabled/DurationMinutes/Count/SuccessCount/Group` 精确键（拒 `schema_version`）；值长 ≤2048；任一非法整体拒绝；写后返回新 `version` 且配置热生效；GET 响应中键名含 password/secret（不区分大小写）的值恒脱敏为 `******`（库内明文不变）；PUT 收到值 `******` 视为哨兵「保持旧值」跳过不覆盖（脱敏回显幂等；哨兵键仍须过白名单与长度校验） |
 | `POST /api/user/topup` | `{key}`（登录态） | `{quota_added,user_quota}`；事务原子核销（条件 UPDATE 未用→已用防并发重复）→ 面额入账 → topup 日志；过期码惰性标记 status=4 并 400 `redemption_expired` |
 | `GET /api/user/self` | -（登录态） | 当前用户对象（同用户视图字段，password_hash 序列化豁免） |
@@ -255,6 +256,13 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
   `GET /api/user/topup/orders`（TOPUP_ORDER_STATUS 状态映射）。/console/invite 调
   `GET /api/user/aff`：邀请码与邀请链接（`{origin}/register?aff={code}`，Register 页
   ?aff= 预填复用）复制、累计返利、邀请人数、返利比例。
+- **日志页按角色取数与 bundle 分包（M3-wave4）**：/console/logs root 走管理面
+  `GET /api/log`（用户/渠道筛选与列保留，行为不变）；普通用户走登录态 `GET /api/log/mine`
+  （服务端会话作用域 + logMineView 白名单，前端隐藏用户/渠道筛选与列、不请求管理面下拉
+  数据源）。App 全部页面组件 React.lazy 按路由分包（Suspense + Spin fallback），vite
+  manualChunks 拆 vendor（react/react-dom/react-router-dom/dayjs）与 antd（antd +
+  @ant-design/icons）——主 chunk 由 1,321.39 kB（gzip 418.81）降至 15.95 kB（gzip 7.01），
+  页面 chunk 按需加载，AntD 独立 chunk 缓存友好（业务迭代不再触发库重下载）。
 
 ### 5.6 hooks 事件投递契约（M2-wave3）
 
@@ -440,3 +448,6 @@ stripe-go SDK）。
 - **测试注入点**：`h.stripeHTTP`/`h.stripeAPIBase` 同包小写字段可指向 httptest 假
   Stripe 端点断言请求形态；epay 验签纯函数直接构造 query；并发幂等证据
   TestEpayNotifyIdempotentConcurrent（12 goroutine 重复通知同一订单，恰一次入账含返利）。
+- **订单超时关单（M3-wave4）**：internal/worker 每 5min 条件 UPDATE `WHERE status=1 AND
+  created_time < cutoff` 置 4=已过期（cutoff = now − `topup.order_timeout_minutes`，缺省
+  15min，热生效）；与回调结算的单向状态机互斥关系见 docs/04 第九节第 4 小节。

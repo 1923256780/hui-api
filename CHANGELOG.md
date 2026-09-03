@@ -9,6 +9,22 @@
 
 ### 新增
 
+- M3-wave4 worker + bundle 优化 + 个人日志视角（M3 收官）：internal/worker 极简 ticker 池
+  （手写零新依赖：Task{Name,Interval,Run} 统一 Start/Stop、goroutine 内 time.Ticker、
+  panic recover 不带崩进程、Stop 幂等）挂载 main 启动链路——验证码清扫（1min 调
+  verification.Sweep，原 main 内联清扫 goroutine 收编）与订单超时关单（5min 条件 UPDATE
+  `status=1 AND created_time < cutoff` 置 4=已过期，阈值 `topup.order_timeout_minutes`
+  缺省 15min 热生效；与支付回调构成单向状态机）；GET /api/log/mine（登录态本人日志分页：
+  会话作用域 user_id 恒取会话用户 + logMineView 白名单（无 user_id/channel_id），支持
+  model_name/时间过滤）；前端 Logs 页按角色取数（root 走 /api/log 全量、普通用户走
+  /api/log/mine，用户/渠道列与筛选按白名单隐藏）；App 全页面 React.lazy + Suspense +
+  vite manualChunks（vendor/antd 分包）——主 chunk 1,321.39 kB → 15.95 kB（gzip 7.01，
+  页面按路由懒加载，AntD 独立 chunk 缓存友好）；ADR-0006（options 白名单/哨兵脱敏/
+  默认关不落库）、ADR-0007（支付回调双验签差异/金额逐位校验/条件更新幂等）；测试：
+  worker 包 4 例（过期清理/到期关单/未到期不动/已支付永不关单）、log mine 所有权与
+  白名单断言、order_test Windows 时钟粒度修复（UnixNano 撞 order_no，atomic 序数后缀，
+  docs/11）；e2e 冒烟 scripts/e2e-smoke.ps1 隔离环境 22/22 全绿（注册→登录→2FA 二段式→
+  兑换码→/api/log/mine 白名单→epay mock 手工签名回调→买家入账→aff 返利→订单 paid）；
 - M3-wave3 支付对接 + 邀请返利（Task #21）：internal/payment 适配层零 SDK 依赖——
   epay.go（MD5 签名：参数名字典序 k=v& 末尾接 key、空值与 sign/sign_type 不参与、
   hex 小写、恒时比较验签；SubmitURL 构造）与 stripe.go（Checkout Session 创建：form
