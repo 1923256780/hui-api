@@ -18,7 +18,8 @@
 # 产物：-OutDir 下 run1\run2（report.json / tokens.tsv / smoke.txt）、
 #       report-diff.txt、tokens-diff.txt、drill-summary.txt；转发计费复核由
 #       演练生成的 bin\drill-read（Go 侧过滤，输出单对象 JSON）完成。
-# 安全：tokens.tsv 含令牌明文，仅存在于本地产物目录，演练后自行删除。
+# 安全：tokens.tsv 含令牌明文，仅存在于本地产物目录；演练结束（含 migrate 失败中断）
+# 自动删除（L5 评审），对账结论留存 tokens-diff.txt。
 
 param(
     [string]$BackupDir = 'D:\EngineeringFiles\Backups',
@@ -313,6 +314,13 @@ if (-not $hardFail) {
         $hardFail = $true
     }
 }
+
+# ---- 4.5 清理令牌明文（L5 评审：tokens.tsv 含明文，diff 完成即删，含中断路径）----
+foreach ($r in 1..2) {
+    $tp = Join-Path (Join-Path $OutDir ('run' + $r)) 'tokens.tsv'
+    if (Test-Path $tp) { Remove-Item -Path $tp -Force -ErrorAction SilentlyContinue }
+}
+$summary.Add('tokens.tsv 明文清单已自动删除（对账结论留存 tokens-diff.txt）')
 
 # ---- 5. 汇总 ------------------------------------------------------------
 $summary.Add("artifacts: " + $OutDir)

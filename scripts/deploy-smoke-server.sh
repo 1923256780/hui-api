@@ -5,7 +5,7 @@
 #   ./deploy-smoke-server.sh <tokens.tsv> [expect_schema]
 #   HUI_BASE=http://127.0.0.1:3000 可覆盖目标（旁路 3100 缺省；3000 接管后切换冒烟复用）
 #   tokens.tsv      migrate -export-tokens 产物（TSV 表头 id/user_id/key，含令牌明文，
-#                   敏感文件——冒烟通过后立即删除，不留明文令牌落盘）
+#                   敏感文件——脚本退出（含中断）时自动删除（L5 评审），不留明文落盘）
 #   expect_schema   期望 schema 版本（缺省 4；schema 演进时由 runbook 传入新值）
 #
 # 冒烟项（全部走 127.0.0.1:3100 旁路，不触碰生产网关与其数据）：
@@ -26,6 +26,8 @@ BASE=${HUI_BASE:-http://127.0.0.1:3100}
 ROOT=${HUI_ROOT:-/home/ubuntu/hui-api}
 UNIT_NAME=${HUI_UNIT:-hui-api}
 TOKEN_FILE=${1:?usage: deploy-smoke-server.sh <tokens.tsv> [expect_schema]}
+# 令牌清单含明文，脚本退出（含 Ctrl-C 中断）即自动删除——不留明文落盘（L5 评审）。
+trap 'rm -f -- "$TOKEN_FILE"' EXIT
 EXPECT_SCHEMA=${2:-4}
 MODEL=${HUI_SMOKE_MODEL:-glm-5.3-flash}
 LOGCHECK=$ROOT/bin/logcheck-linux-amd64
