@@ -20,27 +20,27 @@ import (
 
 // 日志写盘默认参数。
 const (
-	DefaultLogBuffer   = 1024                     // channel 缓冲
-	DefaultLogBatch    = 128                      // 单批最多条数
-	DefaultLogInterval = 200 * time.Millisecond   // 攒批定时窗口
+	DefaultLogBuffer   = 1024                   // channel 缓冲
+	DefaultLogBatch    = 128                    // 单批最多条数
+	DefaultLogInterval = 200 * time.Millisecond // 攒批定时窗口
 )
 
 // Detail 是计费依据 JSON（logs.detail 列，docs/03：供对账反向重算）。
 // 字段全部可选：零值整体编码为空串。
 type Detail struct {
-	Mode       string  `json:"mode,omitempty"`             // 计费模式
-	Expr       string  `json:"expr,omitempty"`             // tiered_expr 表达式（计费依据）
-	GroupRatio float64 `json:"group_ratio,omitempty"`      // 组倍率
-	ModelRatio float64 `json:"model_ratio,omitempty"`      // classic 输入价（对账依据）
-	CompRatio  float64 `json:"completion_ratio,omitempty"` // classic 输出倍率
-	Frozen     int64   `json:"frozen,omitempty"`           // 预扣冻结额
-	CacheRead  int     `json:"cache_read_tokens,omitempty"` // 缓存读 tokens（prompt 的子集）
+	Mode       string  `json:"mode,omitempty"`                // 计费模式
+	Expr       string  `json:"expr,omitempty"`                // tiered_expr 表达式（计费依据）
+	GroupRatio float64 `json:"group_ratio,omitempty"`         // 组倍率
+	ModelRatio float64 `json:"model_ratio,omitempty"`         // classic 输入价（对账依据）
+	CompRatio  float64 `json:"completion_ratio,omitempty"`    // classic 输出倍率
+	Frozen     int64   `json:"frozen,omitempty"`              // 预扣冻结额
+	CacheRead  int     `json:"cache_read_tokens,omitempty"`   // 缓存读 tokens（prompt 的子集）
 	BilledIn   int     `json:"billed_input_tokens,omitempty"` // 表达式变量 p = prompt - cache
-	Estimated  bool    `json:"estimated,omitempty"`        // usage 缺失，本地粗估
-	Aborted    bool    `json:"aborted,omitempty"`          // 失败/流中断（退款终态）
-	RefundFull bool    `json:"refund_full,omitempty"`      // 全额退款标记
-	Unlimited  bool    `json:"unlimited,omitempty"`        // 令牌不限额（跳过账本）
-	Err        string  `json:"error,omitempty"`            // 计费异常摘要（宁可少收路径）
+	Estimated  bool    `json:"estimated,omitempty"`           // usage 缺失，本地粗估
+	Aborted    bool    `json:"aborted,omitempty"`             // 失败/流中断（退款终态）
+	RefundFull bool    `json:"refund_full,omitempty"`         // 全额退款标记
+	Unlimited  bool    `json:"unlimited,omitempty"`           // 令牌不限额（跳过账本）
+	Err        string  `json:"error,omitempty"`               // 计费异常摘要（宁可少收路径）
 }
 
 // empty 判断 Detail 是否全零（全零不落 detail，省存储）。
@@ -67,10 +67,10 @@ type LogRecord struct {
 	ChannelID        int64
 	Protocol         string
 	ModelName        string
-	PromptTokens     int    // 上游 usage 原始值（含缓存读部分）
+	PromptTokens     int // 上游 usage 原始值（含缓存读部分）
 	CompletionTokens int
-	Quota            int64  // 实结（或粗估）quota
-	UseTime          int64  // 请求耗时（秒）
+	Quota            int64 // 实结（或粗估）quota
+	UseTime          int64 // 请求耗时（秒）
 	IsStream         bool
 	CreatedTime      int64  // unix 秒
 	Detail           Detail // 计费依据

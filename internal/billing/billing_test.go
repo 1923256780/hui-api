@@ -67,10 +67,10 @@ func TestChargeClassicRatioRounding(t *testing.T) {
 		input int
 		want  int64
 	}{
-		{0.15, 10, 1},  // 10×0.15×0.5 = 0.75 → 1
-		{0.1, 99, 5},   // 99×0.1×0.5 = 4.95 → 5
-		{0.1, 90, 5},   // 90×0.1×0.5 = 4.5 → 5（半数向上）
-		{0.1, 89, 4},   // 89×0.1×0.5 = 4.45 → 4
+		{0.15, 10, 1}, // 10×0.15×0.5 = 0.75 → 1
+		{0.1, 99, 5},  // 99×0.1×0.5 = 4.95 → 5
+		{0.1, 90, 5},  // 90×0.1×0.5 = 4.5 → 5（半数向上）
+		{0.1, 89, 4},  // 89×0.1×0.5 = 4.45 → 4
 		{0.0000001, 1, 0},
 	}
 	for i, c := range cases {
@@ -269,7 +269,7 @@ func TestBuiltinPriceFallback(t *testing.T) {
 // TestDBPriorityOverBuiltin DB 配置优先于内置价单。
 func TestDBPriorityOverBuiltin(t *testing.T) {
 	e := newTestEngine(t, mapSource{
-		OptionKeyBillingMode: `{"example-tiered":"per_call"}`,
+		OptionKeyBillingMode:  `{"example-tiered":"per_call"}`,
 		OptionKeyBillingPrice: `{"example-tiered":0.5}`,
 	})
 	price, err := e.LookupPrice("example-tiered")

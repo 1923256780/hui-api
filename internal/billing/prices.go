@@ -26,16 +26,16 @@ const BuiltinPricesVersion = 1
 
 // priceFile 是 prices.json 的线格式。
 type priceFile struct {
-	Version     int                    `json:"version"`
-	UpdatedAt   string                 `json:"updated_at"`
-	Description string                 `json:"description"`
-	Models      map[string]priceEntry  `json:"models"`
+	Version     int                   `json:"version"`
+	UpdatedAt   string                `json:"updated_at"`
+	Description string                `json:"description"`
+	Models      map[string]priceEntry `json:"models"`
 }
 
 // priceEntry 是单模型的内置价条目。
 type priceEntry struct {
 	Mode            Mode     `json:"mode"`
-	Expr            string   `json:"expr,omitempty"`       // tiered_expr
+	Expr            string   `json:"expr,omitempty"`        // tiered_expr
 	ModelRatio      *float64 `json:"model_ratio,omitempty"` // classic_ratio
 	CompletionRatio *float64 `json:"completion_ratio,omitempty"`
 	PerCallPrice    *float64 `json:"per_call_price,omitempty"` // per_call（美元/次）
