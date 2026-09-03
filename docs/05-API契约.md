@@ -144,8 +144,8 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 | `GET /api/user/identities` | -（登录态） | `{items:[{id,user_id,provider,provider_uid,created_time}]}` 本人身份列表 |
 | `DELETE /api/user/identities/:id` | -（登录态） | 解绑（归属校验，非本人 404）；无口令且最后一个身份 400 `identity_last`（防锁死） |
 | `POST /api/user/totp/setup` | -（登录态） | `{secret, otpauth_uri}`（issuer="Hui Api"，account=用户名）；secret 落库 enabled=0 待确认（见 5.9） |
-| `POST /api/user/totp/enable` | `{code}`（登录态） | 验码通过 → enabled=1；未 setup 400 `totp_not_setup`、已启用 400 `totp_already_enabled`、错码 400 `totp_code_invalid` |
-| `POST /api/user/totp/disable` | `{code}`（登录态） | 验码通过 → secret/enabled 双列清空；未启用 400 `totp_not_enabled`、错码 400（密钥保留可重试） |
+| `POST /api/user/totp/enable` | `{code}`（登录态） | 验码通过 → enabled=1；未 setup 400 `totp_not_setup`、已启用 400 `totp_already_enabled`、错码 400 `totp_code_invalid`；错码受 `totp\|<uid>` 失败预算约束（见 5.7 表，M4 评审） |
+| `POST /api/user/totp/disable` | `{code}`（登录态） | 验码通过 → secret/enabled 双列清空；未启用 400 `totp_not_enabled`、错码 400（密钥保留可重试）；错码受 `totp\|<uid>` 失败预算约束（见 5.7 表，M4 评审） |
 | `POST /api/user/password` | `{old_password?,new_password}`（登录态） | 有口令账号必验旧口令（400 `old_password_mismatch`）；OAuth 建户无口令账号首次设置免验（留空）；≥6 位；成功后 auth_version++（其他会话全失效）并重签当前会话 |
 | `POST /api/user/email` | `{email}`（登录态） | 格式校验 + 查重（409 `email_conflict`）；成功 `{email}` |
 | `POST /api/user/logout` | - | 清除会话 cookie |
@@ -156,7 +156,7 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 | `GET/POST/DELETE /api/redemption` | 批量生成 `{count:1..100,name,quota>0,expired_time}` | `data.keys` 明文数组（`redd-`+24hex）仅此一次；key 冲突自动重试，重试穷尽整批拒绝 |
 | `GET /api/log` | 过滤：`user_id/token_id/channel_id/model_name/start_timestamp/end_timestamp`（Unix 秒闭区间） | id 降序；channel_id 已生效（M2-wave3 日志回填实际服务渠道） |
 | `GET /api/log/mine` | `?page&page_size&model_name&start_timestamp&end_timestamp`（登录态） | 当前用户本人请求日志分页（id 降序）；所有权作用域强制取会话用户（user_id 查询参数被忽略）；响应为白名单字段（logMineView）——不含 user_id（会话即归属）与 channel_id（管理面路由语义），也不含令牌名/key 等密钥材料；M3-wave4 |
-| `GET/PUT /api/option` | PUT `{"options":{k:v}}` | 键白名单：`relay.*`/`billing_setting.*`/`hooks.*`/`smtp.*`/`register.*`/`oauth.*`/`turnstile.*`/`epay.*`/`stripe.*`/`aff.*`/`topup.*` 前缀 + `ModelRatio`/`CompletionRatio`/`GroupRatio`/`ModelRequestRateLimitEnabled/DurationMinutes/Count/SuccessCount/Group` 精确键（拒 `schema_version`）；值长 ≤2048；任一非法整体拒绝；写后返回新 `version` 且配置热生效；GET 响应中键名含 password/secret（不区分大小写）的值恒脱敏为 `******`（库内明文不变）；PUT 收到值 `******` 视为哨兵「保持旧值」跳过不覆盖（脱敏回显幂等；哨兵键仍须过白名单与长度校验） |
+| `GET/PUT /api/option` | PUT `{"options":{k:v}}` | 键白名单：`relay.*`/`billing_setting.*`/`hooks.*`/`auth.*`/`smtp.*`/`register.*`/`oauth.*`/`turnstile.*`/`epay.*`/`stripe.*`/`aff.*`/`topup.*` 前缀 + `ModelRatio`/`CompletionRatio`/`GroupRatio`/`ModelRequestRateLimitEnabled/DurationMinutes/Count/SuccessCount/Group` 精确键（拒 `schema_version`）；值长 ≤2048；任一非法整体拒绝；写后返回新 `version` 且配置热生效；GET 响应中键名含 password/secret（不区分大小写）的值恒脱敏为 `******`（库内明文不变）；PUT 收到值 `******` 视为哨兵「保持旧值」跳过不覆盖（脱敏回显幂等；哨兵键仍须过白名单与长度校验）；GET 响应 `items` 数组元素不含 `id`（2026-09-03 起，键名本身即唯一标识） |
 | `POST /api/user/topup` | `{key}`（登录态） | `{quota_added,user_quota}`；事务原子核销（条件 UPDATE 未用→已用防并发重复）→ 面额入账 → topup 日志；过期码惰性标记 status=4 并 400 `redemption_expired` |
 | `GET /api/user/self` | -（登录态） | 当前用户对象（同用户视图字段，password_hash 序列化豁免） |
 | `GET /api/user/stats` | -（登录态） | 当前用户今日统计 `{start_timestamp,end_timestamp,requests,prompt_tokens,completion_tokens,tokens,quota,models[]}`；服务端 SQL 聚合 logs，作用域恒为会话用户（user_id 查询参数被忽略）；models 按 quota 降序上限 100 行（`model_name/requests/prompt_tokens/completion_tokens/quota`）；时间口径=服务器本地今日 [0 点，当前]；无日志返回全零空态（200 非错误） |
@@ -228,6 +228,7 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 - **options 键白名单双侧同步**：系统设置页可编辑键集合与 `internal/api/option.go`
   allowedOptionKey 对齐（`relay.*`/`billing_setting.*`/`hooks.*` + M3-wave1 商业化前缀
   `smtp.*`/`register.*`/`oauth.*`/`turnstile.*`/`epay.*`/`stripe.*`/`aff.*`/`topup.*`
+  + M4 评审 `auth.*`（登录限频键）
   + ModelRatio/CompletionRatio/GroupRatio/ModelRequestRateLimit* 五精确键）；新增可写键
   必须前后端同步，否则保存即 400 `option_forbidden`；换皮类键（SystemName 等）后端不支持，
   前端不提供编辑。**敏感键脱敏与哨兵（M3-wave1）**：键名含 password/secret（不区分
@@ -318,15 +319,22 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 - **IP 限频参数表**（复用 internal/ratelimit 滑动窗口，与管理面/转发面限流器隔离；
   被拒请求无副作用、响应带 Retry-After 秒数）：
 
-  | 限频键 | 窗口 | 上限 |
-  | --- | --- | --- |
-  | `register\|<IP>` | 1h | 5 |
-  | `login\|<IP>` | 1h | 10 |
-  | `reset\|<IP>` | 1h | 5 |
+  | 限频键 | 窗口 | 上限 | 记账语义 |
+  | --- | --- | --- | --- |
+  | `register\|<IP>` | 1h | 5 | 放行即记账 |
+  | `login\|<IP>` | 1h | 30（可配置 `auth.login_ip_limit`，≤0 回退缺省） | 失败记账（响应 ≥400 才消耗） |
+  | `sendcode\|<IP>` | 1h | 10 | 放行即记账（每次成功发码有真实出站成本） |
+  | `reset\|<IP>` | 1h | 5 | 放行即记账 |
+  | `totp\|<uid>` | 1h | 10（enable/disable 共享） | 失败记账（验证通过 Reset 清零） |
 
-  Login 的 IP 限频先于凭据校验（含账号不存在场景）；`POST /api/user/login/2fa` 与密码登录
-  共用 `login\|<IP>` 限频键（stage1 会话重放爆破动态码受同一窗口约束）；发码限频由
-  verification.Store 按（邮箱+purpose）维度承担（60s/20 每日），与上表 IP 维度正交。
+  Login 的 IP 限频先于凭据校验（含账号不存在场景）；失败记账语义下成功登录零消耗
+  （NAT 共出口多用户不受历史成功拖累，M4 评审）；`POST /api/user/login/2fa` 与密码登录
+  共用 `login\|<IP>` 失败预算（stage1 会话重放爆破动态码受同一窗口约束；一次完整登录
+  两段均成功只走预检不记账，错码才推进窗口）。发码双维度正交：`sendcode\|<IP>` IP 预算
+  （防邮件轰炸；Turnstile 启用时发码与注册同规则强制人机校验，未启用不校验）+
+  verification.Store 按（邮箱+purpose）维度（60s/20 每日）。`totp\|<uid>` 为 TOTP
+  enable/disable 共享失败预算（错码才记账，验证通过 Reset 清零），防劫持会话爆破
+  验码关闭 2FA（M4 评审）。
 
 ### 5.8 OAuth 通用 provider 契约（M3-wave2）
 
@@ -384,7 +392,8 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
   - `POST /api/user/totp/enable {code}`：验码（±1 窗口，库 pquerna/otp）→ enabled=1；
     未 setup 400 `totp_not_setup`；错码 400（不启用，可重试）。
   - `POST /api/user/totp/disable {code}`：验码 → secret/enabled 双列清空；未启用 400
-    `totp_not_enabled`；错码 400（密钥保留可重试）。**关闭 2FA 必须验码**（非仅登录态）。
+    `totp_not_enabled`；错码 400（密钥保留可重试）。**关闭 2FA 必须验码**（非仅登录态）；
+    enable/disable 错码共用 `totp\|<uid>` 失败预算（1h×10，验证通过清零，M4 评审）。
   - secret 为敏感材料：options 脱敏规则之外，模型层 `json:"-"` 序列化豁免，任何接口
     不回显已确认的 secret（setup 响应仅在待确认期返回一次）。
 - **个人中心自服务**（登录态）：

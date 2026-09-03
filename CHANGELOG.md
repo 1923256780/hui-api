@@ -209,6 +209,26 @@
 - 构建链：`scripts/build.ps1` 增加 `web` 目标与 `Ensure-WebDist` 兜底（dist 缺失自动前端构建、失败回退占位页）；CI go job 补 web/dist 占位步骤。
 - 测试：store 建表/迁移/读写分离/PRAGMA/DDL 双源等价、config 热更新（含并发）、hook 队列与 panic 隔离用例；`/health`、`/api/status` 契约测试。
 
+### 修复
+
+- M4 评审修复（认证限频 + 脚本批次）：
+  - 登录 IP 限频改「失败记账」语义（internal/ratelimit 新增 AllowFailures/TallyFail/Reset）：
+    成功登录零消耗（修复 NAT 共出口 IP 多用户可用性回归），连续失败仍受限保持爆破防护；
+  - 2FA 二段式 login 与 login/2fa 共用同一失败预算，一次完整登录两段成功不再双耗预算；
+  - login 上限可配置：options 白名单新增 `auth.*` 前缀，`auth.login_ip_limit` 缺省 10 → 30
+    （非法值回退缺省，热生效）；
+  - 发码端点新增 `sendcode|<IP>` 独立 IP 预算（1h×10，放行即记账）防邮件轰炸，Turnstile
+    启用时发码与注册同规则强制人机校验（未启用不校验）；
+  - TOTP enable/disable 错码受 `totp|<uid>` 失败预算约束（1h×10 共享，验证通过 Reset
+    清零），防劫持会话爆破验码关闭 2FA；
+  - handler.go 补挂 `POST /api/pay/epay/notify`（order.go EpayNotify 已兼容 PostForm，
+    路由同 handler 双挂 GET/POST，公开组不变）；
+  - scripts/deploy-smoke-server.sh 冒烟结束（trap EXIT）与 scripts/migrate-drill.ps1
+    演练结束自动删除令牌明文清单（tokens.tsv），不留明文落盘；
+  - 测试：internal/ratelimit 失败记账语义 3 例；internal/api auth_limit_test 6 例
+    （成功登录 15 次不 429 / 连续失败 10 次 429 / 2FA 完整登录不双耗 / 限频键可配置热
+    生效 / 发码超限与 Turnstile 强制 / TOTP 错码预算与成功清零）。
+
 ### 变更
 
 - `.gitignore` 补充 `config.yaml`、`*.db-shm`、`*.db-wal`。
@@ -217,6 +237,11 @@
 
 ### 文档
 
+- M4 评审消歧：docs/05 /api/option GET 响应 items 形状注记（items 不含 id，2026-09-03 起）
+  与 `auth.*` 白名单前缀；5.7 限频参数表补「记账语义」列并新增 `sendcode|<IP>`/
+  `totp|<uid>` 两键；docs/04 订单 rate 快照落 topup_orders.rate 独立列（非 detail 字段）
+  一句话消歧；docs/06 切换步骤 3 补迁移工具守卫说明（目标库非空 migrate 拒跑，须重置
+  空库或显式 -allow-live-target）。
 - M2 收官（Task #19）：docs/05 端点清单补 `/api/user/stats` 行、5.1 自服务组例外、5.2
   端点明细、5.5 看板按角色取数注记、细化计划补一条；docs/10 状态块更新（Task #19 修复
   + e2e 实测与清理）与交接记录新增；docs/11 踩坑新增一条（普通用户页面直调管理面
