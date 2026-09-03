@@ -72,6 +72,60 @@ func (h *Handler) ListTokens(c *gin.Context) {
 	writeOK(c, gin.H{"items": rows, "total": total, "page": page, "page_size": pageSize})
 }
 
+// tokenMineView 是 GET /api/token/mine 的响应视图：面向登录用户的令牌自视
+// 字段白名单——不含密钥材料（key/key_hash，model 层本已豁免，此处显式列举）
+// 与管理配置字段（tpm_rpm/tags/allow_ips，由管理员经管理面维护）。
+type tokenMineView struct {
+	ID             int64  `json:"id"`
+	UserID         int64  `json:"user_id"`
+	Name           string `json:"name"`
+	Status         int    `json:"status"`
+	Quota          int64  `json:"quota"`
+	RemainQuota    int64  `json:"remain_quota"`
+	UnlimitedQuota bool   `json:"unlimited_quota"`
+	BudgetDuration string `json:"budget_duration"`
+	BudgetResetAt  int64  `json:"budget_reset_at"`
+	Group          string `json:"group"`
+	ModelLimits    string `json:"model_limits"`
+	ExpiredTime    int64  `json:"expired_time"`
+	CreatedTime    int64  `json:"created_time"`
+	AccessedTime   int64  `json:"accessed_time"`
+}
+
+// ListMyTokens 当前登录用户名下令牌列表（登录态即可，docs/05 自服务组）：
+// 所有权作用域强制取会话用户（user_id 查询参数被忽略，不可越权枚举他人令牌），
+// 响应为 tokenMineView 白名单字段，分页形状与 /api/token 管理列表一致。
+func (h *Handler) ListMyTokens(c *gin.Context) {
+	u := currentUser(c)
+	if u == nil {
+		writeErr(c, http.StatusUnauthorized, "unauthorized", "登录状态无效")
+		return
+	}
+	page, pageSize := pagination(c)
+	q := h.st.Read.Model(&model.Token{}).Where("user_id = ?", u.ID)
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		writeErr(c, http.StatusInternalServerError, "query_failed", "查询令牌失败")
+		return
+	}
+	var rows []model.Token
+	if err := q.Order("id desc").Offset((page - 1) * pageSize).Limit(pageSize).Find(&rows).Error; err != nil {
+		writeErr(c, http.StatusInternalServerError, "query_failed", "查询令牌失败")
+		return
+	}
+	items := make([]tokenMineView, 0, len(rows))
+	for _, t := range rows {
+		items = append(items, tokenMineView{
+			ID: t.ID, UserID: t.UserID, Name: t.Name, Status: t.Status,
+			Quota: t.Quota, RemainQuota: t.RemainQuota, UnlimitedQuota: t.UnlimitedQuota,
+			BudgetDuration: t.BudgetDuration, BudgetResetAt: t.BudgetResetAt,
+			Group: t.Group, ModelLimits: t.ModelLimits, ExpiredTime: t.ExpiredTime,
+			CreatedTime: t.CreatedTime, AccessedTime: t.AccessedTime,
+		})
+	}
+	writeOK(c, gin.H{"items": items, "total": total, "page": page, "page_size": pageSize})
+}
+
 // CreateToken 创建令牌：校验归属用户存在，生成一次性明文密钥；
 // 非 unlimited 且未显式传 remain 时缺省 remain=quota。
 func (h *Handler) CreateToken(c *gin.Context) {

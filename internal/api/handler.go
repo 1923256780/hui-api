@@ -68,6 +68,9 @@ func (h *Handler) Register(r gin.IRouter) {
 	g.POST("/user/topup", h.RequireAuth, h.TopupRedeem)
 	g.GET("/user/self", h.RequireAuth, h.GetSelf)
 	g.POST("/token/:id/assign", h.RequireAuth, h.AssignTokenQuota)
+	// 名下令牌列表（M2 浏览器验收缺陷修复）：登录态 + 所有权作用域，供
+	// topup 页等普通用户视图替代管理列表 GET /api/token（root 专属）。
+	g.GET("/token/mine", h.RequireAuth, h.ListMyTokens)
 	h.registerManaged(g.Group("", h.RequireRoot))
 }
 
