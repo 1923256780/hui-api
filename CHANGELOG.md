@@ -9,6 +9,37 @@
 
 ### 新增
 
+- M3-wave2 OAuth + 2FA + 个人中心（Task #20）：OAuth 通用 provider
+  （internal/api/oauth.go）——github/linuxdo/oidc 三 provider（配置键
+  oauth.*.client_id/secret + oauth.oidc.issuer，未配置 404 oauth_not_configured），
+  GET /api/oauth/:provider 生成 32hex state 写一次性 HttpOnly cookie（5min 防 CSRF）
+  302 authorize（GitHub scope=read:user；linuxdo/oidc 走 {issuer}/.well-known 发现
+  并包级缓存 1h），GET /api/oauth/:provider/callback state 恒时比较 → form POST 换
+  token → 拉 userinfo（GitHub 取 id；oidc 取 userinfo sub，信任 TLS 通道不验 ID
+  token 签名，权衡注记 docs/11）→ user_identities 命中签发完整会话 302 /console，
+  未命中且注册开放自动建户（username=<provider>_<uid>，空口令账号，事务内建户+绑定
+  原子，撞名回滚，email 冲突置空）；登录态 bind 绑定模式（state cookie 标 bind+uid，
+  回调双保险校验，永不签发/顶替会话，已绑本人幂等/他人冲突拒绝）、GET
+  /api/user/identities 本人列表、DELETE /api/user/identities/:id 解绑（归属校验 +
+  无口令且最后一身份 400 identity_last 防锁死）；redirect_uri 从请求 Host 推导
+  （scheme 信任 X-Forwarded-Proto，注记 docs/11）；2FA TOTP（internal/api/totp.go，
+  pquerna/otp v1.5.0）——POST /api/user/totp/setup（issuer="Hui Api" account=用户名，
+  secret 落库 enabled=0 待确认返回 secret+otpauth URI）、/enable（验码 enabled=1）、
+  /disable（验码双列清空，未启用/错码各归因）；二段式登录——sessionClaims 加 Stage
+  claim（0 完整/1 待 2FA）+ Issue 每调用 TTL，Login 对 TOTP 用户签 stage1 会话
+  （TTL 5min）返回 {require_2fa:true}，公开端点 POST /api/user/login/2fa 验码重签
+  完整会话（与密码登录共用 login|<IP> 限频），RequireAuth 校验 Stage==0 否则 401
+  totp_required（stage1 访问自服务防提权，旧 cookie 无 stage 字段向后兼容）；个人中心
+  （internal/api/profile.go）——POST /api/user/password（旧口令校验，OAuth 无口令账号
+  首设免验；auth_version++ 并重签当前会话）与 POST /api/user/email（格式+查重
+  409 email_conflict）；前端——Login 二段式（验证码输入步）+OAuth 按钮（按 /api/setup
+  能力发现渲染）+注册链接+oauth_failed 提示，新建 Register.tsx（对接注册含验证码发送
+  60s 倒计时、Turnstile widget 轻量封装、aff 邀请码 ?aff= 预填），新建 Profile.tsx
+  （账号信息/改密/改邮箱/2FA 三态管理/身份列表+解绑+绑定跳转），路由 /register 与
+  /console/profile + ConsoleLayout 菜单；api 包新增 17 测试（state CSRF 篡改/自动建户
+  事务撞名回滚/注册关闭/命中登录/禁用拒绝/bind 流程/身份防锁死/OIDC 发现缓存/setup
+  探测/TOTP 全链路/二段式防提权/错码/disable 后免验/改密改邮箱）；契约 docs/05
+  §5.8/§5.9、权衡与坑 docs/11；
 - M3-wave1 schema v4 与公开注册体系（Task #19）：schema v4（迁移
   0004_m3_commercial + TestDDLEquivalence 双源对账八表）——users 加邀请/两步验证 5 列
   （aff_code/inviter_id/aff_history_quota/totp_secret（json:"-" 豁免序列化）/

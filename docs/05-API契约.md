@@ -119,7 +119,7 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 
 ### 5.1 通用约定
 
-- **鉴权**：除 `/api/user/login`、`/api/user/logout`、`/api/status` 外全部要求 root 会话（签名 cookie，缺失/篡改/过期/禁用/auth_version 不匹配 → 401/403）；例外：用户自服务组（`/api/user/topup`、`/api/user/self`、`/api/user/stats`、`/api/token/:id/assign`、`/api/token/mine`）仅要求登录态（RequireAuth，普通用户可访）；公开注册组（`/api/setup`、`/api/user/register`、`/api/verification_code`、`/api/user/reset_password`，M3-wave1）无会话要求，安全边界由开关门控 + IP 限频 + 人机校验/验证码承担（见 5.7）。
+- **鉴权**：除 `/api/user/login`、`/api/user/logout`、`/api/status` 外全部要求 root 会话（签名 cookie，缺失/篡改/过期/禁用/auth_version 不匹配 → 401/403）；例外：用户自服务组（`/api/user/topup`、`/api/user/self`、`/api/user/stats`、`/api/token/:id/assign`、`/api/token/mine`，及 M3-wave2 的 `/api/user/password`、`/api/user/email`、`/api/user/totp/*`、`/api/user/identities*`、`/api/oauth/:provider/bind`）仅要求登录态（RequireAuth，普通用户可访）；公开组（M3-wave1：`/api/setup`、`/api/user/register`、`/api/verification_code`、`/api/user/reset_password`；M3-wave2：`/api/oauth/:provider`、`/api/oauth/:provider/callback`、`/api/user/login/2fa`）无会话要求，安全边界由开关门控 + IP 限频 + 人机校验/验证码/state cookie 承担（见 5.7/5.8）。**半登录态（M3-wave2）**：TOTP 启用用户的 stage1 会话（Stage≠0）只能访问 `/api/user/login/2fa`，访问其他 RequireAuth 端点一律 401 `totp_required`（防半登录提权，见 5.9）。
 - **响应包裹**：成功 `{"success":true,"message":"","data":...}`，失败 `{"success":false,"message":"...","code":"语义码"}`；创建类返回 201，其余 200；连通测试结果语义不落库不影响熔断（HTTP 恒 200）。
 - **幂等写**：PUT 为整对象幂等替换——显式字段含零值全部生效，同 body 重复 PUT 响应体一致；缺省归一化：status 0→启用、token.expired_time 0→永久（`-1`）、group 空→`default`、user.role 0→普通用户；channel.key 空=保留旧值（唯一例外，防回显脱敏值覆盖明文）；token 的 key/key_hash/user_id 与 root 自身 role/status 不可经 PUT 修改。
 - **分页**：`?page=1&page_size=20`（page_size 上限 100），响应 `data.items/total/page/page_size`；列表排序：channel/option 按 id 升序或 key 字典序，token/redemption/log 按 id 降序。
@@ -129,7 +129,18 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 
 | 端点 | 请求要点 | 响应 data 要点 / 特殊语义 |
 | --- | --- | --- |
-| `POST /api/user/login` | `{username,password}` | `{id,username,display_name,role}` + Set-Cookie；用户名不存在与密码错误同一错误（401 `invalid_credentials`） |
+| `POST /api/user/login` | `{username,password}` | TOTP 未启用：`{id,username,display_name,role}` + Set-Cookie 完整会话；TOTP 启用：`{require_2fa:true}` + Set-Cookie stage1 会话（TTL 5min，仅可用于 /api/user/login/2fa，见 5.9）；用户名不存在与密码错误同一错误（401 `invalid_credentials`） |
+| `POST /api/user/login/2fa` | `{code}`（公开；凭 stage1 会话） | 验码通过 → 重签完整会话 `{id,username,display_name,role}`；错码 400 `totp_code_invalid`；与密码登录共用 `login\|<IP>` 限频（见 5.9） |
+| `GET /api/oauth/:provider` | -（公开；provider∈github/linuxdo/oidc） | 302 authorize + Set-Cookie 一次性 state cookie（5min HttpOnly）；未配置 404 `oauth_not_configured`（见 5.8） |
+| `GET /api/oauth/:provider/callback` | `?code&state`（公开） | 登录模式成功 302 /console（命中身份或自动建户）；bind 模式成功 302 /console/profile；任一失败 302 `/login?oauth_failed=1`（见 5.8） |
+| `GET /api/oauth/:provider/bind` | -（登录态） | 同 authorize 发起，但 state cookie 标记 bind+当前 uid；回调成功后绑定当前用户（见 5.8） |
+| `GET /api/user/identities` | -（登录态） | `{items:[{id,user_id,provider,provider_uid,created_time}]}` 本人身份列表 |
+| `DELETE /api/user/identities/:id` | -（登录态） | 解绑（归属校验，非本人 404）；无口令且最后一个身份 400 `identity_last`（防锁死） |
+| `POST /api/user/totp/setup` | -（登录态） | `{secret, otpauth_uri}`（issuer="Hui Api"，account=用户名）；secret 落库 enabled=0 待确认（见 5.9） |
+| `POST /api/user/totp/enable` | `{code}`（登录态） | 验码通过 → enabled=1；未 setup 400 `totp_not_setup`、已启用 400 `totp_already_enabled`、错码 400 `totp_code_invalid` |
+| `POST /api/user/totp/disable` | `{code}`（登录态） | 验码通过 → secret/enabled 双列清空；未启用 400 `totp_not_enabled`、错码 400（密钥保留可重试） |
+| `POST /api/user/password` | `{old_password?,new_password}`（登录态） | 有口令账号必验旧口令（400 `old_password_mismatch`）；OAuth 建户无口令账号首次设置免验（留空）；≥6 位；成功后 auth_version++（其他会话全失效）并重签当前会话 |
+| `POST /api/user/email` | `{email}`（登录态） | 格式校验 + 查重（409 `email_conflict`）；成功 `{email}` |
 | `POST /api/user/logout` | - | 清除会话 cookie |
 | `GET/POST/PUT/DELETE /api/user` | 创建必填 username+password（bcrypt）；改密非空即重置并递增 auth_version | 用户名重复 409 `username_conflict`；root 自改 role/status 400 `self_lockout`；删管理员 400 `delete_admin_forbidden`；删除用户级联删其令牌 |
 | `GET/POST/PUT/DELETE /api/channel` | name/base_url 必填，type 1=OpenAI 兼容 2=Anthropic | 响应 key 恒脱敏（首 3+`***`+末 4），明文不序列化输出；写后熔断复位 |
@@ -167,6 +178,13 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 | 500 | `mail_send_failed` | SMTP 发信失败（错误信息不含服务端内部细节，M3-wave1） |
 | 429 | `rate_limited`（转发面） | 限流触发，响应带 `Retry-After`（见 4.1/限流语义；公开组 IP 限频见 5.7） |
 | 500 | `*_failed` | 存储层写失败（create/update/delete/query_failed） |
+| 404 | `oauth_not_configured` | OAuth provider 未配置 client_id/secret（oidc 另需 issuer），M3-wave2 |
+| 401 | `totp_required` | stage1 半登录会话访问 RequireAuth 端点（需先完成两步验证，M3-wave2） |
+| 400 | `totp_code_invalid` | TOTP 动态码错误（enable/disable/login/2fa 共用；不消费密钥可重试，M3-wave2） |
+| 400 | `totp_not_setup` / `totp_already_enabled` | 未 setup 先 enable / 已启用再 setup（M3-wave2） |
+| 400 | `totp_not_enabled` | 未启用两步验证时调 disable（M3-wave2） |
+| 400 | `identity_last` | 无口令用户解绑最后一个第三方身份（防锁死，M3-wave2） |
+| 400 | `old_password_mismatch` | 修改口令时旧口令不正确（M3-wave2） |
 
 ### 5.4 限流契约（M2-wave1，转发面）
 
@@ -229,8 +247,9 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 ### 5.7 公开注册体系契约（M3-wave1）
 
 公开组四端点（无会话要求），安全边界 = 开关门控 + IP 限频 + 人机校验/邮箱验证码。
-配置键见 5.5 键表（`register.*`/`smtp.*`/`turnstile.*` 前缀）；OAuth 三项在 M3-wave2
-落地前恒报 false；Turnstile/支付网关为行业通用服务，可达性由配置方自担。
+配置键见 5.5 键表（`register.*`/`smtp.*`/`turnstile.*` 前缀）；OAuth 三项自 M3-wave2 起
+按配置真实探测（client_id/secret 配齐才可用，oidc 另需 issuer，契约见 5.8）；Turnstile/支付
+网关为行业通用服务，可达性由配置方自担。
 
 - **GET /api/setup**（公开）：返回 FeatureFlags——
   `{register_enabled, email_verification, turnstile_site_key, oauth:{github,linuxdo,oidc}}`；
@@ -268,5 +287,73 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
   | `login\|<IP>` | 1h | 10 |
   | `reset\|<IP>` | 1h | 5 |
 
-  Login 的 IP 限频先于凭据校验（含账号不存在场景）；发码限频由 verification.Store
-  按（邮箱+purpose）维度承担（60s/20 每日），与上表 IP 维度正交。
+  Login 的 IP 限频先于凭据校验（含账号不存在场景）；`POST /api/user/login/2fa` 与密码登录
+  共用 `login\|<IP>` 限频键（stage1 会话重放爆破动态码受同一窗口约束）；发码限频由
+  verification.Store 按（邮箱+purpose）维度承担（60s/20 每日），与上表 IP 维度正交。
+
+### 5.8 OAuth 通用 provider 契约（M3-wave2）
+
+公开组三端点 + 登录态绑定/解绑/列表，涉及文件 `internal/api/oauth.go`；provider 名单
+硬编码 `github`/`linuxdo`/`oidc`（名单外 404 `oauth_not_configured`）。
+
+- **配置键**（options 白名单 `oauth.*`，写后热生效；secret 键 GET 回显脱敏）：
+  `oauth.github.client_id/client_secret`、`oauth.linuxdo.client_id/client_secret`、
+  `oauth.oidc.client_id/client_secret`、`oauth.oidc.issuer`。三项各自配齐才可用
+  （`/api/setup` 的 oauth 块与 FeatureFlags 真实探测）。
+- **GET /api/oauth/:provider**（公开，登录发起）：provider 已配置校验（否则 404
+  `oauth_not_configured`）→ 生成 32hex state（crypto/rand）→ 写一次性 HttpOnly cookie
+  `oauth_state`（值 `state|mode|uid`，mode=login/bind；TTL 5min，SameSite=Lax，防 CSRF）→
+  302 authorize。GitHub scope=`read:user`，authorize 端点固定；linuxdo/oidc 走
+  `{issuer}/.well-known/openid-configuration` 发现（包级缓存 1h，authorize/token/userinfo
+  三端点）。
+- **GET /api/oauth/:provider/callback**（公开）：state 恒时比较 + cookie 一次性清除
+  （缺失/篡改/过期一律 302 `/login?oauth_failed=1`，不向 URL 泄露细节，无副作用）→
+  form POST（code+redirect_uri+client_id/secret+grant_type）换 access_token → 拉 userinfo
+  （GitHub `api.github.com/user` 取 `id`；oidc 取 userinfo 的 `sub`——**信任 TLS 通道
+  不验 ID token 签名**，权衡注记 docs/11）→ 查 `user_identities(provider,provider_uid)`：
+  命中且用户启用 → 签发完整会话 302 `/console`；命中但禁用 → 失败路径；未命中且
+  `register.enabled` → **自动建户**（username=`<provider>_<uid>`、空 password_hash 密码
+  登录不可用、quota=`register.quota_for_new_user`、email 冲突置空，事务内建户+身份绑定
+  原子，撞名整体回滚）302 `/console`；否则失败路径。
+- **bind 绑定模式**（登录态）：`GET /api/oauth/:provider/bind` 走同一 authorize 流程，
+  state cookie 标记 `bind|<uid>`；callback 校验当前会话（完整会话 + uid 与 state 一致
+  双保险）后落库绑定，成功 302 `/console/profile`。**bind 模式永不签发/顶替会话**：身份已
+  绑本人 → 幂等成功；已绑他人（复合唯一冲突）→ 失败路径。
+- **解绑与列表**（登录态）：`GET /api/user/identities` 本人列表；`DELETE
+  /api/user/identities/:id` 归属校验（非本人 404）+ 防锁死——无 password_hash 且是最后
+  一个身份 → 400 `identity_last`（先在个人中心设置口令即可解绑，首次设密免验旧口令）。
+- **redirect_uri 推导**：scheme 信任 `X-Forwarded-Proto` 首段（反代 TLS 终结场景）→
+  `r.TLS` → 缺省 http；Host 取请求 Host。信任边界与权衡注记 docs/11。
+- **信任边界**：token/userinfo/发现文档为出站请求，目标地址由管理员配置（root 门控）
+  ——与 SMTP/Turnstile/hooks 同一信任边界，非终端用户输入，不构成 SSRF 面。
+
+### 5.9 两步验证（TOTP）与个人中心契约（M3-wave2）
+
+涉及文件 `internal/api/totp.go`（三端点）与 `profile.go`（改密/改邮箱）、`session.go`
+（Stage claim）。
+
+- **会话 Stage 语义**：sessionClaims 增加 `stage`（0=完整会话，1=待两步验证）；旧 cookie
+  无该字段反序列化为 0，向后兼容。`Issue` 支持每调用 TTL；stage1 会话 TTL 固定 5min。
+  RequireAuth 校验 `Stage==0`，否则 401 `totp_required`——**stage1 仅可用于
+  /api/user/login/2fa**（防半登录态提权）。
+- **二段式登录**：Login 对 `totp_enabled && totp_secret != ""` 用户签 stage1 会话返回
+  `{require_2fa:true}`；`POST /api/user/login/2fa {code}`（公开）凭 stage1 会话验码 →
+  重签 stage0 完整会话并返回用户信息。验码失败 400 `totp_code_invalid`；无/无效 stage1
+  会话 401。disable 后登录免验（直接完整会话）。
+- **TOTP 三端点**（登录态）：
+  - `POST /api/user/totp/setup`：`totp.Generate`（issuer="Hui Api"，account=用户名）→
+    secret 落库 enabled=0 待确认 → `{secret, otpauth_uri}`；已启用 400
+    `totp_already_enabled`。重复 setup 覆盖未确认的旧 secret。
+  - `POST /api/user/totp/enable {code}`：验码（±1 窗口，库 pquerna/otp）→ enabled=1；
+    未 setup 400 `totp_not_setup`；错码 400（不启用，可重试）。
+  - `POST /api/user/totp/disable {code}`：验码 → secret/enabled 双列清空；未启用 400
+    `totp_not_enabled`；错码 400（密钥保留可重试）。**关闭 2FA 必须验码**（非仅登录态）。
+  - secret 为敏感材料：options 脱敏规则之外，模型层 `json:"-"` 序列化豁免，任何接口
+    不回显已确认的 secret（setup 响应仅在待确认期返回一次）。
+- **个人中心自服务**（登录态）：
+  - `POST /api/user/password {old_password?, new_password}`：有口令账号必验旧口令（400
+    `old_password_mismatch`）；OAuth 建户无口令账号首次设置免验（会话即授权依据，先设密
+    才能解绑最后身份防锁死）；≥6 位；成功后 **auth_version++（其他设备会话全失效）并
+    重签当前会话**（无缝续用）。
+  - `POST /api/user/email {email}`：格式校验 + 查重（409 `email_conflict`）。暂不强制
+    邮箱验证码（后续商业化增强项）；改后即可走忘记密码流程找回无口令账号。
