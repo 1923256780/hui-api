@@ -25,10 +25,11 @@ func (h *Handler) registerOptionRoutes(g *gin.RouterGroup) {
 }
 
 // allowedOptionKey 管理面可写键白名单：
-//   - 模块命名空间前缀：relay.*（网关参数）、billing_setting.*（计费显式配置）；
+//   - 模块命名空间前缀：relay.*（网关参数）、billing_setting.*（计费显式配置）、
+//     hooks.*（观测旁路，M2-wave3：enabled / otlp.endpoint / webhook.url）；
 //   - 行业通用计费/限流精确键（与 gateway/billing 包常量同源）。
 func allowedOptionKey(key string) bool {
-	for _, p := range []string{"relay.", "billing_setting."} {
+	for _, p := range []string{"relay.", "billing_setting.", "hooks."} {
 		if strings.HasPrefix(key, p) {
 			return true
 		}

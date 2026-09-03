@@ -3,17 +3,20 @@ package gateway
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/1923256780/hui-api/internal/billing"
 	"github.com/1923256780/hui-api/internal/config"
+	"github.com/1923256780/hui-api/internal/hook"
 	"github.com/1923256780/hui-api/internal/model"
 	"github.com/1923256780/hui-api/internal/override"
 	"github.com/1923256780/hui-api/internal/ratelimit"
@@ -47,6 +50,7 @@ type Gateway struct {
 	ledger  *billing.Ledger         // 预扣费账本（冻结/多退少补/退款）
 	logs    *billing.AsyncLogWriter // 请求日志异步批量落库
 	rl      *ratelimit.Limiter      // 请求/令牌限流（滑动窗口，M2-wave1）
+	hooks   *hook.Dispatcher        // 观测旁路分发（M2-wave3；nil=未挂接不投递）
 }
 
 // New 构造网关。pricer 为已通过内置价单校验的计费引擎（main 启动时 fail-fast 构造）。
@@ -79,6 +83,33 @@ func (g *Gateway) Breaker() *BreakerRegistry { return g.breaker }
 
 // Close 优雅停机排空异步日志（main 收尾调用）。
 func (g *Gateway) Close() { g.logs.Close(logCloseTimeout) }
+
+// OptionKeyHooksEnabled 是 hooks 总开关键（热更，缺省启用；hook 自身对未配置
+// 的 endpoint 已是无操作，此开关用于整体关闭旁路投递）。
+const OptionKeyHooksEnabled = "hooks.enabled"
+
+// SetHooks 挂接观测旁路分发器（main 启动时调用；nil 表示未挂接）。
+func (g *Gateway) SetHooks(d *hook.Dispatcher) { g.hooks = d }
+
+// hooksEnabled 读取总开关（缺省启用）。
+func (g *Gateway) hooksEnabled() bool {
+	if g.rt == nil {
+		return true
+	}
+	v, ok := g.rt.Get(OptionKeyHooksEnabled)
+	if !ok {
+		return true
+	}
+	return v == "true" || v == "1"
+}
+
+// requestIDSeq 请求观测 ID 进程内序号（非密码学用途）。
+var requestIDSeq atomic.Uint64
+
+// newRequestID 生成请求观测 ID（unix 纳秒 + 序号；hook 事件幂等键来源）。
+func newRequestID() string {
+	return fmt.Sprintf("req-%d-%06d", time.Now().UnixNano(), requestIDSeq.Add(1))
+}
 
 // maxBodyBytes 读取入口请求体上限（运行轨热更，缺省 32MB）。
 func (g *Gateway) maxBodyBytes() int64 {
@@ -150,6 +181,24 @@ func (g *Gateway) Serve(c *gin.Context, proto relay.Protocol) {
 		proto.WriteError(c, http.StatusBadRequest, "invalid_request", "缺少 model 字段")
 		return
 	}
+
+	// ---- 3.4 观测旁路（M2-wave3）：生成请求 ID 并装配 hook 投递闭包；
+	// 未显式完成的失败退出路径（无渠道/渠道错误/重试穷尽等）由 defer 兜底。
+	requestID := newRequestID()
+	hookSent := false
+	emitHook := func(evType, errMsg string, channelID int64, data map[string]any) {
+		if g.hooks == nil || hookSent || !g.hooksEnabled() {
+			return
+		}
+		hookSent = true
+		g.hooks.Dispatch(hook.Event{
+			Type: evType, RequestID: requestID, TokenID: tok.ID,
+			ChannelID: channelID, Model: pr.Model, Err: errMsg,
+			Timestamp: time.Now(), IdempotencyKey: requestID + ":" + evType,
+			Data: data,
+		})
+	}
+	defer func() { emitHook("request.failed", "request_not_completed", 0, nil) }()
 
 	// ---- 3.5 令牌级模型白名单（M2-wave1）：非空时请求模型必须命中。
 	if !tokenAllowsModel(tok, pr.Model) {
@@ -358,6 +407,23 @@ func (g *Gateway) Serve(c *gin.Context, proto relay.Protocol) {
 		settled = true
 		submitLog(logPromptTokens(usage, detail.Estimated, raw),
 			logCompletionTokens(usage, detail.Estimated, c), int(actual), detail)
+
+		// 观测旁路（M2-wave3）：成功与流中断/转发失败分别投递（数据含计费与耗时）。
+		hookData := map[string]any{
+			"quota":             actual,
+			"prompt_tokens":     usage.PromptTokens,
+			"completion_tokens": usage.CompletionTokens,
+			"duration_ms":       float64(time.Since(start).Milliseconds()),
+			"stream":            pr.Stream,
+		}
+		if detail.Estimated {
+			hookData["estimated"] = true
+		}
+		if respErr != nil {
+			emitHook("request.failed", respErr.Error(), ch.ID, hookData)
+		} else {
+			emitHook("request.completed", "", ch.ID, hookData)
+		}
 
 		log.Printf("[relay] %s model=%s channel=%d token=%d stream=%v prompt=%d completion=%d quota=%d frozen=%d",
 			proto.Name(), pr.Model, ch.ID, tok.ID, pr.Stream,

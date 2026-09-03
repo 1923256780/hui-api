@@ -100,13 +100,26 @@ func run(addrOverride, configPath string) error {
 		return fmt.Errorf("加载运行轨配置: %w", err)
 	}
 
-	// 4. hook 旁路：注册内置实现，启动有界队列分发（队列满丢弃并计数）。
+	// 4. hook 旁路：注册内置实现与 OTLP/webhook（M2-wave3），启动有界队列分发
+	//（队列满丢弃并计数；endpoint/URL 未配置时 hook 自身静默跳过，热更即时生效）。
 	registry := hook.NewRegistry()
 	if err := registry.Register(hook.NewNoop()); err != nil {
 		return fmt.Errorf("注册 noop hook: %w", err)
 	}
 	if err := registry.Register(hook.NewConsole()); err != nil {
 		return fmt.Errorf("注册 console hook: %w", err)
+	}
+	if err := registry.Register(hook.NewOTLP(func() string {
+		v, _ := rt.Get(hook.OptionKeyOTLPEndpoint)
+		return v
+	})); err != nil {
+		return fmt.Errorf("注册 otlp hook: %w", err)
+	}
+	if err := registry.Register(hook.NewWebhook(func() string {
+		v, _ := rt.Get(hook.OptionKeyWebhookURL)
+		return v
+	})); err != nil {
+		return fmt.Errorf("注册 webhook hook: %w", err)
 	}
 	dispatcher := hook.NewDispatcher(registry, hook.DefaultQueueSize)
 	dispatcher.Start(2)
@@ -118,6 +131,7 @@ func run(addrOverride, configPath string) error {
 		return fmt.Errorf("组装路由: %w", err)
 	}
 	defer gw.Close() // 优雅停机排空异步请求日志（先行于存储层关闭）
+	gw.SetHooks(dispatcher) // 观测旁路挂接（M2-wave3）
 	engine.NoRoute(gin.WrapH(webui.Handler()))
 
 	srv := &http.Server{Addr: addr, Handler: engine}
