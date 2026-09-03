@@ -32,11 +32,13 @@ func newTestRouter(t *testing.T) *gin.Engine {
 	if err != nil {
 		t.Fatalf("构造 Runtime 失败: %v", err)
 	}
-	eng, gw, err := newRouter(st, rt, schemaVersion, "test-secret")
+	eng, gw, stopSweeper, err := newRouter(st, rt, schemaVersion, "test-secret")
 	if err != nil {
 		t.Fatalf("组装路由失败: %v", err)
 	}
 	t.Cleanup(func() { gw.Close() })
+	// Cleanup 后注册先执行：先停验证码清扫器，再排空网关异步日志，最后关存储。
+	t.Cleanup(stopSweeper)
 	return eng
 }
 

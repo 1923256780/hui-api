@@ -144,13 +144,14 @@ func TestSmokeDualProtocol(t *testing.T) {
 	}
 
 	// 本地起服务（与 run() 相同的完整路由）。
-	engine, gw, err := newRouter(st, rt, schemaVersion, "smoke-secret")
+	engine, gw, stopSweeper, err := newRouter(st, rt, schemaVersion, "smoke-secret")
 	if err != nil {
 		t.Fatalf("组装路由失败: %v", err)
 	}
 	srv := httptest.NewServer(engine)
 	t.Cleanup(srv.Close)
-	t.Cleanup(gw.Close) // 后注册先执行：先排空日志（写库），再关 HTTP 与存储
+	t.Cleanup(gw.Close)    // 后注册先执行：先排空日志（写库），再关 HTTP 与存储
+	t.Cleanup(stopSweeper) // 最先停验证码清扫器
 	base := srv.URL
 	client := &http.Client{}
 	auth := http.Header{"Authorization": []string{"Bearer " + plain}}

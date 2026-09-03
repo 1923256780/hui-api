@@ -2,7 +2,7 @@
 //
 // 启动顺序（docs/01）：加载启动轨配置 → 打开存储层并迁移 → 加载运行轨配置 →
 // 启动 hook 旁路 → 挂路由 → 监听信号。停机顺序：HTTP 优雅关闭（带超时）→
-// hook 队列排空 → 关闭连接池。
+// hook 队列排空 → 验证码清扫器停止 → 关闭连接池。
 package main
 
 import (
@@ -41,6 +41,9 @@ var (
 
 // httpShutdownTimeout 优雅停机窗口：等待在途请求完成的上限。
 const httpShutdownTimeout = 10 * time.Second
+
+// verificationSweepInterval 验证码过期清扫周期（M3-wave1）。
+const verificationSweepInterval = time.Minute
 
 func main() {
 	showVersion := flag.Bool("version", false, "打印版本信息后退出")
@@ -126,11 +129,12 @@ func run(addrOverride, configPath string) error {
 	defer dispatcher.Stop(3 * time.Second)
 
 	// 5. 路由 + 前端 SPA。
-	engine, gw, err := newRouter(st, rt, schemaVersion, cfg.SessionSecret)
+	engine, gw, stopSweeper, err := newRouter(st, rt, schemaVersion, cfg.SessionSecret)
 	if err != nil {
 		return fmt.Errorf("组装路由: %w", err)
 	}
-	defer gw.Close() // 优雅停机排空异步请求日志（先行于存储层关闭）
+	defer gw.Close()        // 优雅停机排空异步请求日志（先行于存储层关闭）
+	defer stopSweeper()     // 停止验证码过期清扫（M3-wave1）
 	gw.SetHooks(dispatcher) // 观测旁路挂接（M2-wave3）
 	engine.NoRoute(gin.WrapH(webui.Handler()))
 
@@ -162,11 +166,12 @@ func run(addrOverride, configPath string) error {
 	return nil
 }
 
-// newRouter 组装路由：/health 健康检查、/api/status 状态端点、转发面 /v1/* 与
-// 管理面 /api（M2-wave1：root 引导 + 会话 + CRUD）。计费引擎在此构造（内置价单
-// 启动校验，schema 非法时 fail-fast 拒绝启动），同时返回 Gateway 供调用方停机时
-// 排空异步日志。sessionSecret 为会话 cookie 签名密钥（run() 已保证非空）。
-func newRouter(st *store.Store, rt *config.Runtime, schemaVersion int64, sessionSecret string) (*gin.Engine, *gateway.Gateway, error) {
+// newRouter 组装路由：/health 健康检查、/api/status 状态端点（含 features 特性
+// 开关块）、转发面 /v1/* 与管理面 /api（root 引导 + 会话 + CRUD + M3-wave1 公开
+// 注册体系）。计费引擎在此构造（内置价单启动校验，schema 非法时 fail-fast 拒绝
+// 启动）。返回 Gateway（停机排空异步日志）与验证码清扫器停止函数。
+// sessionSecret 为会话 cookie 签名密钥（run() 已保证非空）。
+func newRouter(st *store.Store, rt *config.Runtime, schemaVersion int64, sessionSecret string) (*gin.Engine, *gateway.Gateway, func(), error) {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -175,7 +180,8 @@ func newRouter(st *store.Store, rt *config.Runtime, schemaVersion int64, session
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "version": version})
 	})
-	// /api/status 契约（docs/05 管理面统一包裹结构）：服务状态、版本、schema 版本。
+	// /api/status 契约（docs/05 管理面统一包裹结构）：服务状态、版本、schema 版本、
+	// features 特性开关块（M3-wave1：注册/邮箱验证/人机校验/OAuth 可用性）。
 	r.GET("/api/status", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
@@ -184,6 +190,7 @@ func newRouter(st *store.Store, rt *config.Runtime, schemaVersion int64, session
 				"commit":         commit,
 				"schema_version": schemaVersion,
 				"config_version": rt.Version(),
+				"features":       api.FeatureFlags(rt),
 			},
 		})
 	})
@@ -191,7 +198,7 @@ func newRouter(st *store.Store, rt *config.Runtime, schemaVersion int64, session
 	// 计费引擎（docs/04）：价格来源 options 运行轨优先、内置 prices.json 兜底。
 	pricer, err := billing.NewEngine(rt)
 	if err != nil {
-		return nil, nil, fmt.Errorf("构造计费引擎: %w", err)
+		return nil, nil, nil, fmt.Errorf("构造计费引擎: %w", err)
 	}
 
 	// 转发面（docs/05 端点清单）：编排在 gateway，协议适配在 relay/<protocol>。
@@ -203,12 +210,16 @@ func newRouter(st *store.Store, rt *config.Runtime, schemaVersion int64, session
 	v1.GET("/models", gw.HandleModels)
 
 	// 管理面（M2-wave1，docs/05）：先保证 root 存在（幂等），再挂会话与 /api CRUD。
+	// M3-wave1：Handler 内置注册体系依赖（限频/siteverify/mailer/验证码存储），
+	// 启动验证码过期清扫后台任务，停机时停止。
 	if _, err := api.EnsureRootUser(st); err != nil {
-		return nil, nil, fmt.Errorf("引导 root 用户: %w", err)
+		return nil, nil, nil, fmt.Errorf("引导 root 用户: %w", err)
 	}
 	sess := api.NewSessionManager([]byte(sessionSecret))
-	api.New(st, rt, gw, sess).Register(r)
-	return r, gw, nil
+	ah := api.New(st, rt, gw, sess)
+	stopSweeper := ah.StartVerificationSweeper(verificationSweepInterval)
+	ah.Register(r)
+	return r, gw, stopSweeper, nil
 }
 
 // randomSecret 生成 32 字节随机密钥的 hex 编码（SESSION_SECRET 缺省兜底）。

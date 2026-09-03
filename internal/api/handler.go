@@ -1,5 +1,6 @@
 // handler.go 是管理面 API 的路由注册与登录/登出端点（M2-wave1，docs/05）。
 // 管理 CRUD（渠道/令牌/用户/兑换码/日志/配置）在 chunk 中按域拆分文件挂载。
+// M3-wave1 新增公开注册体系路由（register.go）与登录 IP 限频。
 package api
 
 import (
@@ -11,8 +12,11 @@ import (
 
 	"github.com/1923256780/hui-api/internal/config"
 	"github.com/1923256780/hui-api/internal/gateway"
+	"github.com/1923256780/hui-api/internal/mailer"
 	"github.com/1923256780/hui-api/internal/model"
+	"github.com/1923256780/hui-api/internal/ratelimit"
 	"github.com/1923256780/hui-api/internal/store"
+	"github.com/1923256780/hui-api/internal/verification"
 )
 
 // Handler 是管理面 API 处理器集合（按域拆分文件，共享 rt/gw/sess）。
@@ -21,11 +25,32 @@ type Handler struct {
 	rt   *config.Runtime
 	gw   *gateway.Gateway // 渠道/令牌写后失效挂接（Reset/Invalidate）；测试可传 nil
 	sess *SessionManager
+
+	// M3-wave1 注册体系依赖（New 构造默认实现；测试可整体替换字段注入 mock）：
+	authRL   *ratelimit.Limiter  // 登录/注册/重置 IP 限频（与转发链路限流器隔离）
+	verifier TurnstileVerifier   // 人机校验（siteverify，5s 超时）
+	mailer   mailer.Mailer       // SMTP 邮件发送（smtp.enabled 门控）
+	vstore   *verification.Store // 邮箱验证码存储（email+purpose 维度）
 }
 
-// New 构造管理面处理器。
+// New 构造管理面处理器（含 M3-wave1 注册体系默认依赖）。
 func New(st *store.Store, rt *config.Runtime, gw *gateway.Gateway, sess *SessionManager) *Handler {
-	return &Handler{st: st, rt: rt, gw: gw, sess: sess}
+	return &Handler{
+		st:       st,
+		rt:       rt,
+		gw:       gw,
+		sess:     sess,
+		authRL:   ratelimit.New(nil),
+		verifier: newTurnstileVerifier(),
+		mailer:   mailer.New(func(key string) (string, bool) { return rt.Get(key) }),
+		vstore:   verification.New(nil),
+	}
+}
+
+// StartVerificationSweeper 启动验证码过期清扫后台任务（返回停止函数；
+// main 停机时调用释放资源）。
+func (h *Handler) StartVerificationSweeper(interval time.Duration) (stop func()) {
+	return h.vstore.StartSweeper(interval)
 }
 
 // resetChannel 写后使渠道相关运行态失效：复位该渠道熔断计数，新配置立即生效
@@ -58,21 +83,25 @@ func paramID(c *gin.Context) int64 {
 	return id
 }
 
-// Register 挂载 /api 路由组：login/logout 公开；其余管理端点 root 权限，
-// 由各域文件在 registerManaged 中挂载。
+// Register 挂载 /api 路由组：login/logout 与注册体系（setup/register/
+// verification_code/reset_password）公开；自服务端点仅要求登录；其余管理
+// 端点 root 权限，由各域文件在 registerManaged 中挂载。
 func (h *Handler) Register(r gin.IRouter) {
 	g := r.Group("/api")
 	g.POST("/user/login", h.Login)
 	g.POST("/user/logout", h.Logout)
+	// 公开注册体系（M3-wave1，docs/05）。
+	g.GET("/setup", h.GetSetup)
+	g.POST("/user/register", h.RegisterUser)
+	g.POST("/verification_code", h.SendVerificationCode)
+	g.POST("/user/reset_password", h.ResetPassword)
 	// 登录用户自服务端点（M2-wave3）：仅要求登录，不要求 root（docs/05）。
 	g.POST("/user/topup", h.RequireAuth, h.TopupRedeem)
 	g.GET("/user/self", h.RequireAuth, h.GetSelf)
-	// 自服务统计（M2 收官 Task #19）：普通用户看板数据源，服务端按会话用户
-	// 聚合今日 logs；root 看板仍走管理面 /api/log 自行聚合。
+	// 自服务统计（M2 收官）：普通用户看板数据源，服务端按会话用户聚合今日 logs。
 	g.GET("/user/stats", h.RequireAuth, h.GetUserStats)
 	g.POST("/token/:id/assign", h.RequireAuth, h.AssignTokenQuota)
-	// 名下令牌列表（M2 浏览器验收缺陷修复）：登录态 + 所有权作用域，供
-	// topup 页等普通用户视图替代管理列表 GET /api/token（root 专属）。
+	// 名下令牌列表（M2 缺陷修复）：登录态 + 所有权作用域。
 	g.GET("/token/mine", h.RequireAuth, h.ListMyTokens)
 	h.registerManaged(g.Group("", h.RequireRoot))
 }
@@ -87,9 +116,13 @@ func (h *Handler) registerManaged(g *gin.RouterGroup) {
 	h.registerOptionRoutes(g)
 }
 
-// Login 用户名密码登录：校验 users 表（bcrypt），通过后签发签名会话 cookie。
-// 用户名不存在与密码错误返回同一错误（不泄露账号存在性）。
+// Login 用户名密码登录：IP 限频（1h×10）→ 校验 users 表（bcrypt），通过后
+// 签发签名会话 cookie。用户名不存在与密码错误返回同一错误（不泄露账号存在性）。
 func (h *Handler) Login(c *gin.Context) {
+	if ok, retry := h.authRL.AllowRequest("login|"+c.ClientIP(), loginIPLimitWindow, loginIPLimitMax, 0); !ok {
+		writeRetryAfter(c, retry)
+		return
+	}
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
