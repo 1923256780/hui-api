@@ -5,9 +5,9 @@
 //   - 传输：OTLP/HTTP JSON（application/json，POST <endpoint>/v1/metrics），
 //     累计 temporality（=2）：序列 startTime 固定，每次导出发全量累计值；
 //   - 指标集（属性 model/outcome/kind 标识序列维度）：
-//       hui.request.duration_ms  histogram，单位 ms
-//       hui.request.tokens       histogram，kind=prompt|completion
-//       hui.request.status       monotonic sum（成功/失败计数）
+//     hui.request.duration_ms  histogram，单位 ms
+//     hui.request.tokens       histogram，kind=prompt|completion
+//     hui.request.status       monotonic sum（成功/失败计数）
 //   - endpoint 经 EndpointFn 动态读取（hooks.otlp.endpoint 热更即时生效），
 //     未配置时静默跳过；导出超时 3s，失败丢弃并计数。
 package hook

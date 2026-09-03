@@ -1,6 +1,6 @@
 // budget.go 令牌预算周期惰性重置（M2-wave3，docs/04）：
 //
-//   - tokens.budget_duration 声明预算窗口：''=无周期（一次额度用完为止）、
+//   - tokens.budget_duration 声明预算窗口：”=无周期（一次额度用完为止）、
 //     '24h' / '7d' / '30d' 按固定时长滚动、'monthly' 按自然月滚动（相位对齐）；
 //   - tokens.budget_reset_at 记录下次重置时间（unix 秒；0=未初始化，首次请求落边界）；
 //   - 窗口语义：周期内消耗受 remain_quota 封顶（与预扣费账本共用一列），窗口
@@ -39,7 +39,7 @@ func budgetWindowFixed(duration string) time.Duration {
 }
 
 // nextBudgetBoundary 从 from 推进一个窗口返回下一边界。monthly 按自然月推进
-//（同号日缺失时钳制到月末），其余按固定时长。
+// （同号日缺失时钳制到月末），其余按固定时长。
 func nextBudgetBoundary(duration string, from time.Time) time.Time {
 	if duration == BudgetDurationMonthly {
 		return addMonthsClamped(from, 1)
@@ -48,7 +48,7 @@ func nextBudgetBoundary(duration string, from time.Time) time.Time {
 }
 
 // addMonthsClamped 推进 n 个自然月：目标月不存在同号日时钳制到月末
-//（1/31 → 2/28，闰年 1/29 → 2/29）。time.Date 的月份溢出规范化保证 m+n>12 自动进位年份。
+// （1/31 → 2/28，闰年 1/29 → 2/29）。time.Date 的月份溢出规范化保证 m+n>12 自动进位年份。
 func addMonthsClamped(from time.Time, n int) time.Time {
 	first := time.Date(from.Year(), from.Month()+time.Month(n), 1,
 		from.Hour(), from.Minute(), from.Second(), from.Nanosecond(), from.Location())

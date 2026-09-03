@@ -182,7 +182,7 @@ func TestMonthlyClamp(t *testing.T) {
 		want time.Time
 	}{
 		{time.Date(2026, 1, 31, 8, 0, 0, 0, loc), time.Date(2026, 2, 28, 8, 0, 0, 0, loc)},
-		{time.Date(2024, 1, 29, 8, 0, 0, 0, loc), time.Date(2024, 2, 29, 8, 0, 0, 0, loc)}, // 闰年
+		{time.Date(2024, 1, 29, 8, 0, 0, 0, loc), time.Date(2024, 2, 29, 8, 0, 0, 0, loc)},  // 闰年
 		{time.Date(2026, 12, 31, 8, 0, 0, 0, loc), time.Date(2027, 1, 31, 8, 0, 0, 0, loc)}, // 跨年
 		{time.Date(2026, 3, 15, 8, 0, 0, 0, loc), time.Date(2026, 4, 15, 8, 0, 0, 0, loc)},
 	}

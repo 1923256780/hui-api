@@ -93,8 +93,8 @@ func (h *Handler) TopupRedeem(c *gin.Context) {
 		res := tx.Model(&model.Redemption{}).
 			Where("id = ? AND status = ?", r.ID, model.RedemptionUnused).
 			Updates(map[string]any{
-				"status":   model.RedemptionRedeemed,
-				"used_by":  u.ID,
+				"status":    model.RedemptionRedeemed,
+				"used_by":   u.ID,
 				"used_time": now,
 			})
 		if res.Error != nil {
@@ -275,9 +275,9 @@ func writeTopupErr(c *gin.Context, err error) {
 // topupDetail 构造 topup 类日志的 detail JSON（不含兑换码明文，防泄露）。
 func topupDetail(event string, refID, quota int64) string {
 	b, err := json.Marshal(map[string]any{
-		"event": event,
+		"event":  event,
 		"ref_id": refID,
-		"quota": quota,
+		"quota":  quota,
 	})
 	if err != nil {
 		return ""
