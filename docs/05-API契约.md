@@ -27,6 +27,7 @@
 | `/api/option` | options 读写（键白名单，写后 Reload() 热生效） | ✅ M2-wave1 |
 | `/api/user/topup` `/api/user/self` | 兑换码核销 / 当前用户信息（登录态即可，非 root） | ✅ M2-wave3 |
 | `/api/token/:id/assign` | 额度划转（用户余额 → 令牌余额，登录态即可） | ✅ M2-wave3 |
+| `/api/token/mine` | 名下令牌列表（登录态，所有权作用域，白名单字段） | ✅ M2 缺陷修复 |
 | `/api/status` | 服务状态、版本、schema 版本（无鉴权） | ✅ M0 |
 
 ## 二、契约约定（总体）
@@ -110,7 +111,7 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 
 ### 5.1 通用约定
 
-- **鉴权**：除 `/api/user/login`、`/api/user/logout`、`/api/status` 外全部要求 root 会话（签名 cookie，缺失/篡改/过期/禁用/auth_version 不匹配 → 401/403）。
+- **鉴权**：除 `/api/user/login`、`/api/user/logout`、`/api/status` 外全部要求 root 会话（签名 cookie，缺失/篡改/过期/禁用/auth_version 不匹配 → 401/403）；例外：用户自服务组（`/api/user/topup`、`/api/user/self`、`/api/token/:id/assign`、`/api/token/mine`）仅要求登录态（RequireAuth，普通用户可访）。
 - **响应包裹**：成功 `{"success":true,"message":"","data":...}`，失败 `{"success":false,"message":"...","code":"语义码"}`；创建类返回 201，其余 200；连通测试结果语义不落库不影响熔断（HTTP 恒 200）。
 - **幂等写**：PUT 为整对象幂等替换——显式字段含零值全部生效，同 body 重复 PUT 响应体一致；缺省归一化：status 0→启用、token.expired_time 0→永久（`-1`）、group 空→`default`、user.role 0→普通用户；channel.key 空=保留旧值（唯一例外，防回显脱敏值覆盖明文）；token 的 key/key_hash/user_id 与 root 自身 role/status 不可经 PUT 修改。
 - **分页**：`?page=1&page_size=20`（page_size 上限 100），响应 `data.items/total/page/page_size`；列表排序：channel/option 按 id 升序或 key 字典序，token/redemption/log 按 id 降序。
@@ -132,6 +133,7 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 | `POST /api/user/topup` | `{key}`（登录态） | `{quota_added,user_quota}`；事务原子核销（条件 UPDATE 未用→已用防并发重复）→ 面额入账 → topup 日志；过期码惰性标记 status=4 并 400 `redemption_expired` |
 | `GET /api/user/self` | -（登录态） | 当前用户对象（同用户视图字段，password_hash 序列化豁免） |
 | `POST /api/token/:id/assign` | `{quota>0}`（登录态；归属者或管理员） | `{quota_assigned,remain_quota}`；用户余额 → 令牌 remain+quota 同步增加的转移事务；余额不足 400 `insufficient_quota`；unlimited 令牌 400 拒绝 |
+| `GET /api/token/mine` | -（登录态） | 当前用户名下令牌分页列表（形状同管理列表 items/total/page/page_size，id 降序）；所有权作用域强制取会话用户（user_id 查询参数被忽略）；响应为白名单字段——不含 key/key_hash（密钥材料）与 tpm_rpm/tags/allow_ips（管理配置字段） |
 
 ### 5.3 错误码表（管理面语义错误）
 
@@ -171,9 +173,15 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
   allowedOptionKey 对齐（`relay.*`/`billing_setting.*`/`hooks.*` 前缀 + ModelRatio/CompletionRatio/
   GroupRatio/ModelRequestRateLimit* 五精确键）；新增可写键必须前后端同步，否则保存即 400
   `option_forbidden`；换皮类键（SystemName 等）后端不支持，前端不提供编辑。
-- **充值页（M2-wave3）**：/console/topup 调 `GET /api/user/self` + `GET /api/token?user_id=`
-  （管理面端点，root 会话）+ `POST /api/user/topup` + `POST /api/token/:id/assign`；兑换码
-  状态枚举补 4=已过期（REDEMPTION_STATUS，与后端惰性标记语义对齐）。
+- **充值页（M2-wave3，M2 缺陷修复更新）**：/console/topup 调 `GET /api/user/self` +
+  `GET /api/token/mine`（所有权作用域端点，登录态即可；原对接的管理列表
+  `GET /api/token?user_id=` 为 root 专属，普通用户 403）+ `POST /api/user/topup` +
+  `POST /api/token/:id/assign`；兑换码状态枚举补 4=已过期（REDEMPTION_STATUS，与后端惰性
+  标记语义对齐）。
+- **会话探针与角色菜单（M2 缺陷修复）**：ConsoleLayout 会话探针用 `GET /api/user/self`
+  （最低权限端点；用管理端点探针会把普通用户 403「需要管理员权限」误判为会话失效，
+  详见 docs/11 踩坑）；菜单按角色渲染——渠道/用户/兑换码/系统设置为 root 专属
+  （ADMIN_ONLY_KEYS），普通用户见数据看板/令牌/充值/模型广场/日志，直访专属路径回看板。
 
 ### 5.6 hooks 事件投递契约（M2-wave3）
 
