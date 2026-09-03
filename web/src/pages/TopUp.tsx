@@ -5,8 +5,9 @@
 //   3. 额度划转（POST /api/token/:id/assign：user.quota → token.remain_quota）；
 //   4. 在线充值（M3-wave3）：/api/setup 的 topup 网关开关才渲染区块，
 //      POST /api/user/topup/order 下单后整页跳转 pay_url；支付网关回跳
-//      /console/topup?order=<order_no> 时从订单列表回查该单展示支付状态；
-//      订单列表走本人作用域端点 GET /api/user/topup/orders（分页）。
+//      /console/topup?order=<order_no> 时按单号精确查单（GET
+//      /api/user/topup/orders?order_no=...）展示支付状态；订单列表走本人
+//      作用域端点 GET /api/user/topup/orders（分页）。
 // 名下令牌列表走所有权作用域端点 GET /api/token/mine（登录态即可；管理列表
 // /api/token 为 root 专属，普通用户会 403——M2 浏览器验收缺陷修复）。
 import { useCallback, useEffect, useState } from 'react'
@@ -96,9 +97,10 @@ export default function TopUpPage() {
   const [self, setSelf] = useState<UserInfo | null>(null)
   const [setup, setSetup] = useState<SetupData | null>(null)
   const [tokens, setTokens] = useState<Token[]>([])
-  // 在线充值状态（M3-wave3）：网关选择、金额（元）、下单中、订单列表与回跳查单。
-  // returnedOrder：undefined=无回跳参数；null=有参数但未在最近订单中找到；
-  // 其余为回跳单详情（按 status 展示支付结果）。
+  // 在线充值状态（M3-wave3）：网关选择、金额（元/美元随网关切换）、下单中、
+  // 订单列表与回跳查单。
+  // returnedOrder：undefined=无回跳参数；null=有参数但按单号未查到该单
+  //（可能尚未同步）；其余为回跳单详情（按 status 展示支付结果）。
   const [gateway, setGateway] = useState<'epay' | 'stripe'>('epay')
   const [amountYuan, setAmountYuan] = useState<number | null>(null)
   const [paying, setPaying] = useState(false)
@@ -141,9 +143,9 @@ export default function TopUpPage() {
     void load()
   }, [load])
 
-  // loadTopup 订单列表（本人作用域分页）；回跳场景（URL ?order=）在首页
-  // 结果中回查该单展示支付状态——order_no 全局唯一且回跳单必为本人最新
-  // 订单之一，首页即可命中；未找到时提示稍后刷新。
+  // loadTopup 订单列表（本人作用域分页）。回跳查单不依赖首页列表命中：
+  // 由下方独立 effect 按 order_no 精确查询（后端 order_no 参数直取单条），
+  // 翻页/刷新不影响回跳支付状态提示。
   const loadTopup = useCallback(
     async (page: number) => {
       setOrdersLoading(true)
@@ -155,8 +157,6 @@ export default function TopUpPage() {
         setOrders(d.items)
         setOrdersTotal(d.total)
         setOrdersPage(page)
-        const no = searchParams.get('order')
-        if (no) setReturnedOrder(d.items.find((o) => o.order_no === no) ?? null)
       } catch (err) {
         if (err instanceof ApiError && err.status !== 401) {
           message.error(err.message)
@@ -165,12 +165,42 @@ export default function TopUpPage() {
         setOrdersLoading(false)
       }
     },
-    [message, searchParams],
+    [message],
   )
 
   useEffect(() => {
     void loadTopup(1)
   }, [loadTopup])
+
+  // 回跳查单（?order=<order_no>）：按单号精确查询本人订单（order_no 过滤 +
+  // page_size=1 直取），命中展示支付状态；未命中（可能尚未同步）提示稍后
+  // 刷新；无回跳参数时清除提示。
+  useEffect(() => {
+    const no = searchParams.get('order')
+    if (!no) {
+      setReturnedOrder(undefined)
+      return
+    }
+    let cancelled = false
+    api
+      .get<Paged<TopupOrderView>>('/api/user/topup/orders', {
+        page: 1,
+        page_size: 1,
+        order_no: no,
+      })
+      .then((d) => {
+        if (!cancelled) setReturnedOrder(d.items[0] ?? null)
+      })
+      .catch((err) => {
+        if (err instanceof ApiError && err.status !== 401) {
+          message.error(err.message)
+        }
+        if (!cancelled) setReturnedOrder(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [searchParams, message])
 
   // setup 到位后校正网关默认值：默认 'epay' 未启用而 stripe 启用时切换。
   useEffect(() => {
@@ -347,7 +377,7 @@ export default function TopUpPage() {
                 style={{ width: '100%' }}
                 min={0.01}
                 precision={2}
-                placeholder="充值金额（元）"
+                placeholder={gateway === 'stripe' ? '充值金额（美元）' : '充值金额（元）'}
                 value={amountYuan}
                 onChange={(v) => setAmountYuan(v)}
                 onPressEnter={() => void payTopup()}
