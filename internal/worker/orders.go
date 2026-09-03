@@ -2,10 +2,13 @@
 //
 // 语义：pending（status=1）且创建时间早于 now-timeout 的订单一次性置为
 // expired（status=4）——单条条件 UPDATE WHERE status=1，与支付回调结算
-// （pending→paid 条件 UPDATE）构成单向状态机的两侧：SQLite 单写池串行化
+// （pending/expired→paid 条件 UPDATE）构成状态机两侧：SQLite 单写池串行化
 // 下，任一方先完成迁移，另一方 RowsAffected=0，不存在「过期关单覆盖已
-// 支付」或「已过期单再入账」的交错。已支付/失败/过期单不被本任务触及
-// （已支付订单永不关单）。关单是幂等操作，失败留待下一周期自然重试。
+// 支付」的交错。expired 并非终态：结算侧把 expired 一并纳入结算条件
+// （验签+金额校验通过即支付事实），关单后到达的真实支付通知仍会复活入账
+// （status 落 paid），本任务只迁移 pending、永不覆盖 paid。已支付/失败单
+// 不被本任务触及（已支付订单永不关单）。关单是幂等操作，失败留待下一
+// 周期自然重试。
 //
 // 阈值：options 键 topup.order_timeout_minutes（分钟，管理员可调、热生效）
 // 优先，未配置/非法回退 DefaultOrderTimeout=15min（设计默认：覆盖主流支付

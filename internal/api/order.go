@@ -7,12 +7,16 @@
 //     响应纯文本 success/fail（网关重试依据）。
 //   - GET  /api/pay/epay/return（公开）：浏览器回跳 302 控制台（不做状态变更）。
 //   - POST /api/pay/stripe/webhook（公开）：raw body 验签 → 结算事务（幂等）。
-//   - GET  /api/user/topup/orders（登录态）：本人订单分页（所有权作用域）。
+//   - GET  /api/user/topup/orders（登录态）：本人订单分页（所有权作用域），
+//     支持 order_no 精确过滤（回跳查单/对账直取）。
 //
 // 结算事务（settleTopupOrder）沿用兑换码核销同一并发模型（SQLite 单写池 +
 // 条件 UPDATE + RowsAffected 幂等）：网关/币种/金额逐位校验 → 条件迁移
-// pending→paid（RowsAffected=0 即重复通知，幂等跳过）→ 买家入账 → topup
-// 日志 → aff 返利（inviter 存在且 rebate>0 时同事务累加，protocol="aff"）。
+// pending/expired→paid（RowsAffected=0 即重复通知，幂等跳过）→ 买家入账 →
+// topup 日志 → aff 返利（inviter 存在且 rebate>0 时同事务累加，protocol=
+// "aff"）。expired 一并纳入结算条件：验签与金额逐位校验通过即构成支付事实，
+// 15min 超时关单后到达的真实支付通知（网关侧已扣款）仍复活入账，杜绝
+// 「用户已扣款永不入账」的静默吞单。
 package api
 
 import (
@@ -67,6 +71,12 @@ const (
 
 	// stripeWebhookMaxBody webhook 请求体上限（1 MiB）。
 	stripeWebhookMaxBody = 1 << 20
+
+	// maxAmountHardCapCents 单笔充值金额硬上限（1e9 分 = 本币 1000 万元）：
+	// 管理面 max 不限（0）或超配时的兜底封顶——防极限金额把 quota 换算
+	// （amount×QuotaPerDollar）推入 int64 溢出、把 epay money 浮点格式化
+	// 推入精度失控区。
+	maxAmountHardCapCents = int64(1_000_000_000)
 )
 
 // requestBaseURL 由请求推导绝对基地址：scheme 信任反代注入的
@@ -183,14 +193,18 @@ func (h *Handler) CreateTopupOrder(c *gin.Context) {
 		writeErr(c, http.StatusBadRequest, "invalid_request", "gateway 仅支持 epay / stripe")
 		return
 	}
-	// 金额区间：min 默认 100（分）；max 默认 0 = 不限。单位为订单币种的最小
-	// 分数（epay 即 CNY 分，stripe 即 USD 分），契约注记 docs/05。
+	// 金额区间：min 默认 100（分）；max 默认 0 = 不限（实际收敛到硬上限
+	// 1e9 分 = 本币 1000 万元，见 maxAmountHardCapCents）。单位为订单币种
+	// 的最小分数（epay 即 CNY 分，stripe 即 USD 分），契约注记 docs/05。
 	minCents := h.rt.GetInt64(OptionKeyTopupMinAmountCents, 100)
 	if minCents <= 0 {
 		minCents = 1 // 配置兜底：至少 1 分
 	}
 	maxCents := h.rt.GetInt64(OptionKeyTopupMaxAmountCents, 0)
-	if req.AmountCents < minCents || (maxCents > 0 && req.AmountCents > maxCents) {
+	if maxCents <= 0 || maxCents > maxAmountHardCapCents {
+		maxCents = maxAmountHardCapCents // 不限/超配 → 硬上限兜底
+	}
+	if req.AmountCents < minCents || req.AmountCents > maxCents {
 		writeErr(c, http.StatusBadRequest, "amount_out_of_range", "充值金额超出允许区间")
 		return
 	}
@@ -272,10 +286,12 @@ func (h *Handler) CreateTopupOrder(c *gin.Context) {
 }
 
 // settleTopupOrder 回调结算共享事务（epay notify 与 stripe webhook 复用）：
-// 查单 → 网关/币种/金额逐位校验 → 条件 UPDATE pending→paid（RowsAffected=0
-// 即重复通知，幂等跳过）→ 买家入账 → topup 日志 → aff 返利（inviter 存在且
-// rebate>0：inviter.quota 与 aff_history_quota 同事务累加，protocol="aff"）。
-// 返回 settled=false 表示此前已结算（幂等跳过，调用方仍回成功应答）。
+// 查单 → 网关/币种/金额逐位校验 → 条件 UPDATE pending/expired→paid
+// （RowsAffected=0 即重复通知，幂等跳过；expired 纳入结算条件使超时关单后
+// 到达的真实支付通知可复活入账）→ 买家入账 → topup 日志 → aff 返利
+// （inviter 存在且 rebate>0：inviter.quota 与 aff_history_quota 同事务累加，
+// protocol="aff"）。返回 settled=false 表示此前已结算（幂等跳过，调用方
+// 仍回成功应答）。
 func (h *Handler) settleTopupOrder(orderNo, gateway, tradeNo, currency string, moneyMinor int64, notifyRef string) (bool, error) {
 	now := time.Now().Unix()
 	pct := h.rt.GetInt64(OptionKeyAffRebatePercent, 0)
@@ -298,9 +314,13 @@ func (h *Handler) settleTopupOrder(orderNo, gateway, tradeNo, currency string, m
 		if o.AmountCents != moneyMinor {
 			return errOrderAmountMismatch
 		}
-		// 原子结算：条件 UPDATE pending→paid；RowsAffected=0 即重复通知幂等。
+		// 原子结算：条件 UPDATE pending/expired→paid。expired 一并纳入：
+		// 验签与金额逐位校验通过即构成支付事实，超时关单（expired）后到达
+		// 的真实支付通知仍复活入账（status 落 paid）；并发重复通知下另一
+		// 方 RowsAffected=0，恰一次结算的幂等语义不变。
 		res := tx.Model(&model.TopupOrder{}).
-			Where("id = ? AND status = ?", o.ID, model.TopupOrderPending).
+			Where("id = ? AND status IN ?", o.ID,
+				[]int64{model.TopupOrderPending, model.TopupOrderExpired}).
 			Updates(map[string]any{
 				"status":    model.TopupOrderPaid,
 				"trade_no":  tradeNo,
@@ -386,11 +406,23 @@ func affRebateDetail(buyerID, rebate int64) string {
 	return string(b)
 }
 
-// EpayNotify EPay 异步通知（公开）：验签 → trade_status 校验 → 金额逐位解析
-// → 结算事务。响应纯文本 success/fail（网关重试依据）：任何失败（验签/缺单
-// 号/金额非法/结算错误）回 fail 让网关重试；成功与幂等回 success。
+// EpayNotify EPay 异步通知（公开）：取参（GET query 与 POST form 双形态
+// 兼容，GET 优先）→ 验签 → trade_status 校验 → 金额逐位解析 → 结算事务。
+// 响应纯文本 success/fail（网关重试依据）：任何失败（验签/缺单号/金额非法/
+// 结算错误）回 fail 让网关重试；成功与幂等回 success。
 func (h *Handler) EpayNotify(c *gin.Context) {
-	params := make(map[string]string, len(c.Request.URL.Query()))
+	// 取参合并：先 ParseForm 解析 POST 体（x-www-form-urlencoded，部分网关
+	// 以 POST form 提交通知），再以 URL query 覆盖同键（GET 优先）。
+	if err := c.Request.ParseForm(); err != nil {
+		c.String(http.StatusOK, "fail")
+		return
+	}
+	params := make(map[string]string, len(c.Request.PostForm)+len(c.Request.URL.Query()))
+	for k, vs := range c.Request.PostForm {
+		if len(vs) > 0 {
+			params[k] = vs[0]
+		}
+	}
 	for k, vs := range c.Request.URL.Query() {
 		if len(vs) > 0 {
 			params[k] = vs[0]
@@ -493,7 +525,8 @@ func (h *Handler) StripeWebhook(c *gin.Context) {
 	writeOK(c, nil)
 }
 
-// ListMyTopupOrders 当前登录用户本人的充值订单分页（所有权作用域，id desc）。
+// ListMyTopupOrders 当前登录用户本人的充值订单分页（所有权作用域，id desc），
+// 可选 order_no 精确过滤（回跳查单/对账直取，仍限本人单）。
 func (h *Handler) ListMyTopupOrders(c *gin.Context) {
 	u := currentUser(c)
 	if u == nil {
@@ -502,6 +535,9 @@ func (h *Handler) ListMyTopupOrders(c *gin.Context) {
 	}
 	page, pageSize := pagination(c)
 	q := h.st.Read.Model(&model.TopupOrder{}).Where("user_id = ?", u.ID)
+	if no := strings.TrimSpace(c.Query("order_no")); no != "" {
+		q = q.Where("order_no = ?", no)
+	}
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
 		writeErr(c, http.StatusInternalServerError, "query_failed", "查询订单失败")

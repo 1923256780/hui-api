@@ -658,3 +658,261 @@ func TestEpayReturnRedirect(t *testing.T) {
 		t.Fatalf("应重定向到控制台充值页: %q", loc)
 	}
 }
+
+// TestEpayNotifyRevivesExpiredOrder 过期单复活回归（C1）：15min 超时关单后
+// 到达的真实支付通知（验签+金额校验通过）必须入账而非幂等吞掉——expired 单
+// 结算成功、状态落 paid、aff 返利照常；同单重复通知幂等跳过不重复入账。
+func TestEpayNotifyRevivesExpiredOrder(t *testing.T) {
+	r, st, h := newTestAPI(t)
+	u := seedUser(t, st, "alice", "pw-alice", 1)
+	inviter := seedUser(t, st, "boss", "pw-boss", 1)
+	if err := st.Write.Model(&model.User{}).Where("id = ?", u.ID).
+		Update("inviter_id", inviter.ID).Error; err != nil {
+		t.Fatalf("建立邀请关系失败: %v", err)
+	}
+	enableEpay(t, h)
+	setOpts(t, h, map[string]string{OptionKeyAffRebatePercent: "10"})
+
+	// 模拟 worker 已把 pending 单置为 expired（status=4）。
+	o := seedTopupOrder(t, st, u.ID, "epay", "CNY", 1000, 694444, 720, model.TopupOrderExpired)
+	params := map[string]string{
+		"pid":          "1001",
+		"type":         "alipay",
+		"out_trade_no": o.OrderNo,
+		"trade_no":     "20260904001",
+		"trade_status": "TRADE_SUCCESS",
+		"money":        "10.00",
+		"name":         "余额充值",
+	}
+	path := "/api/pay/epay/notify?" + epayNotifyQuery(params, "epay-test-secret")
+
+	// 有效通知：过期单复活入账。
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Body.String() != "success" {
+		t.Fatalf("过期单有效通知应 success 入账，实际 %q", w.Body.String())
+	}
+	o2 := topupOrderByNo(t, st, o.OrderNo)
+	if o2.Status != model.TopupOrderPaid || o2.TradeNo != "20260904001" || o2.PaidTime == 0 {
+		t.Fatalf("过期单应复活为 paid: %+v", o2)
+	}
+	if got := userQuota(t, st, u.ID); got != 694444 {
+		t.Fatalf("复活入账应 694444，实际 %d", got)
+	}
+	// aff 返利照常：694444×10% → 69444。
+	if got := userQuota(t, st, inviter.ID); got != 69444 {
+		t.Fatalf("aff 返利应照常 69444，实际 %d", got)
+	}
+
+	// 同单重复通知：幂等跳过（success），不重复入账/返利。
+	req2 := httptest.NewRequest(http.MethodGet, path, nil)
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	if w2.Body.String() != "success" {
+		t.Fatalf("重复通知应幂等回 success，实际 %q", w2.Body.String())
+	}
+	if got := userQuota(t, st, u.ID); got != 694444 {
+		t.Fatalf("重复通知不应重复入账，余额 %d", got)
+	}
+	if got := userQuota(t, st, inviter.ID); got != 69444 {
+		t.Fatalf("重复通知不应重复返利，返利余额 %d", got)
+	}
+}
+
+// TestStripeWebhookRevivesExpiredOrder stripe 侧同语义回归：expired 单收到
+// 合法 completed webhook 应 200 入账（复活为 paid），重放幂等 200 不重复入账。
+func TestStripeWebhookRevivesExpiredOrder(t *testing.T) {
+	r, st, h := newTestAPI(t)
+	u := seedUser(t, st, "alice", "pw-alice", 1)
+	const secret = "whsec-test"
+	setOpts(t, h, map[string]string{OptionKeyStripeWebhookSecret: secret})
+	o := seedTopupOrder(t, st, u.ID, "stripe", "USD", 1000, 5000000, 100, model.TopupOrderExpired)
+
+	now := time.Now().Unix()
+	body := stripeEventBody("checkout.session.completed", o.OrderNo, 1000)
+	if w := postWebhook(r, body, stripeSigHeader(secret, now, body)); w.Code != http.StatusOK {
+		t.Fatalf("过期单合法 webhook 应 200，实际 %d body=%s", w.Code, w.Body.String())
+	}
+	if got := topupOrderByNo(t, st, o.OrderNo); got.Status != model.TopupOrderPaid {
+		t.Fatalf("过期单应复活为 paid: %+v", got)
+	}
+	if got := userQuota(t, st, u.ID); got != 5000000 {
+		t.Fatalf("复活入账应 5000000，实际 %d", got)
+	}
+	// 幂等重放 → 200 且不重复入账。
+	if w := postWebhook(r, body, stripeSigHeader(secret, now, body)); w.Code != http.StatusOK {
+		t.Fatalf("幂等重放应 200，实际 %d", w.Code)
+	}
+	if got := userQuota(t, st, u.ID); got != 5000000 {
+		t.Fatalf("幂等重放不应重复入账，余额 %d", got)
+	}
+}
+
+// TestEpayNotifyPostForm POST form 形态 notify 兼容（M-E）：部分网关实现以
+// application/x-www-form-urlencoded 提交通知而非 GET query——纯 form 与
+// query/form 混合（合并取参、GET 优先）均应验签通过照常入账。
+func TestEpayNotifyPostForm(t *testing.T) {
+	r, st, h := newTestAPI(t)
+	// 生产路由（handler.go，禁碰的他同事文件）仅挂 GET；本测试内补挂 POST
+	// 直测 handler 的双形态取参。POST form notify 的生产放行需路由侧配合
+	//（g.POST 同路径），已单独上报，不在本批次越界处理。
+	r.POST("/api/pay/epay/notify", h.EpayNotify)
+	u := seedUser(t, st, "alice", "pw-alice", 1)
+	enableEpay(t, h)
+	o := seedTopupOrder(t, st, u.ID, "epay", "CNY", 1000, 694444, 720, model.TopupOrderPending)
+	o3 := seedTopupOrder(t, st, u.ID, "epay", "CNY", 2000, 1388889, 720, model.TopupOrderPending)
+
+	postForm := func(query url.Values, form url.Values) string {
+		t.Helper()
+		path := "/api/pay/epay/notify"
+		if len(query) > 0 {
+			path += "?" + query.Encode()
+		}
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Body.String()
+	}
+	signInto := func(params map[string]string, form url.Values) {
+		form.Set("sign_type", "MD5")
+		form.Set("sign", payment.EPaySign(params, "epay-test-secret"))
+	}
+
+	// 纯 POST form 通知：签名按 form 参数计算，验签通过入账。
+	base := map[string]string{
+		"pid":          "1001",
+		"type":         "alipay",
+		"out_trade_no": o.OrderNo,
+		"trade_no":     "20260904002",
+		"trade_status": "TRADE_SUCCESS",
+		"money":        "10.00",
+		"name":         "余额充值",
+	}
+	form := url.Values{}
+	for k, v := range base {
+		form.Set(k, v)
+	}
+	signInto(base, form)
+	if got := postForm(nil, form); got != "success" {
+		t.Fatalf("纯 POST form 通知应 success 入账，实际 %q", got)
+	}
+	if o2 := topupOrderByNo(t, st, o.OrderNo); o2.Status != model.TopupOrderPaid || o2.TradeNo != "20260904002" {
+		t.Fatalf("纯 POST form 通知应完成结算: %+v", o2)
+	}
+
+	// query/form 混合：部分参数在 query、部分在 form，合并后验签。
+	mixed := map[string]string{
+		"pid":          "1001",
+		"type":         "alipay",
+		"out_trade_no": o3.OrderNo,
+		"trade_no":     "20260904003",
+		"trade_status": "TRADE_SUCCESS",
+		"money":        "20.00",
+		"name":         "余额充值",
+	}
+	query := url.Values{"out_trade_no": {o3.OrderNo}, "trade_no": {"20260904003"}}
+	form2 := url.Values{
+		"pid":          {"1001"},
+		"type":         {"alipay"},
+		"trade_status": {"TRADE_SUCCESS"},
+		"money":        {"20.00"},
+		"name":         {"余额充值"},
+	}
+	signInto(mixed, form2)
+	if got := postForm(query, form2); got != "success" {
+		t.Fatalf("query/form 混合通知应 success 入账，实际 %q", got)
+	}
+	if o4 := topupOrderByNo(t, st, o3.OrderNo); o4.Status != model.TopupOrderPaid {
+		t.Fatalf("混合通知应完成结算: %+v", o4)
+	}
+	if got := userQuota(t, st, u.ID); got != 694444+1388889 {
+		t.Fatalf("POST form 两单入账应 2083333，实际 %d", got)
+	}
+}
+
+// TestCreateTopupOrderAmountHardCap 充值金额硬上限（1e9 分 = 本币 1000 万元，
+// L1 溢出防御）：max 配置不限（0）或超配时下单金额超过硬上限一律 400 拒绝
+// （防 quota 换算 int64 溢出与 epay money 浮点格式化精度失控）；恰在硬上限
+// 的合法大额单照常创建且换算无溢出。
+func TestCreateTopupOrderAmountHardCap(t *testing.T) {
+	r, st, h := newTestAPI(t)
+	seedUser(t, st, "alice", "pw-alice", 1)
+	cookie := loginAndCookie(t, r, "alice", "pw-alice")
+	enableEpay(t, h)
+
+	// 默认 max=0（不限）：超过硬上限 1e9 分应拒绝。
+	w := doJSON(t, r, http.MethodPost, "/api/user/topup/order", cookie,
+		map[string]any{"gateway": "epay", "amount_cents": int64(1_000_000_001)})
+	if w.Code != http.StatusBadRequest || respCode(t, w.Body.Bytes()) != "amount_out_of_range" {
+		t.Fatalf("超过硬上限应 400 amount_out_of_range，实际 %d body=%s", w.Code, w.Body.String())
+	}
+	// 超配 max 大于硬上限：同样收敛到硬上限拒绝。
+	setOpts(t, h, map[string]string{OptionKeyTopupMaxAmountCents: "999999999999"})
+	w = doJSON(t, r, http.MethodPost, "/api/user/topup/order", cookie,
+		map[string]any{"gateway": "epay", "amount_cents": int64(1_000_000_001)})
+	if w.Code != http.StatusBadRequest || respCode(t, w.Body.Bytes()) != "amount_out_of_range" {
+		t.Fatalf("超配 max 仍应受硬上限约束，实际 %d body=%s", w.Code, w.Body.String())
+	}
+	// 恰在硬上限：允许创建（quota = (1e9×500000+360)/720 = 694444444444，
+	// int64 范围内无溢出）。
+	w = doJSON(t, r, http.MethodPost, "/api/user/topup/order", cookie,
+		map[string]any{"gateway": "epay", "amount_cents": int64(1_000_000_000)})
+	if w.Code != http.StatusOK {
+		t.Fatalf("恰好硬上限应允许下单，实际 %d body=%s", w.Code, w.Body.String())
+	}
+	data := decodeOrderResp(t, w.Body.Bytes())
+	if data.Quota != 694444444444 {
+		t.Fatalf("大额换算应无溢出（694444444444），实际 %d", data.Quota)
+	}
+	if o := topupOrderByNo(t, st, data.OrderNo); o.AmountCents != 1_000_000_000 || o.Status != model.TopupOrderPending {
+		t.Fatalf("硬上限订单快照不符: %+v", o)
+	}
+}
+
+// TestListMyTopupOrdersExactOrderNo order_no 精确查询（L4 回跳查单契约）：
+// 命中本人单返回单元素列表；所有权作用域保持（他人单号不可见）；未知单号
+// 返回空列表；无参数时行为与普通分页一致。
+func TestListMyTopupOrdersExactOrderNo(t *testing.T) {
+	r, st, _ := newTestAPI(t)
+	a := seedUser(t, st, "alice", "pw-alice", 1)
+	b := seedUser(t, st, "bob", "pw-bob", 1)
+	oa := seedTopupOrder(t, st, a.ID, "epay", "CNY", 100, 69444, 720, model.TopupOrderPaid)
+	ob := seedTopupOrder(t, st, b.ID, "stripe", "USD", 100, 500000, 100, model.TopupOrderPending)
+	cookieA := loginAndCookie(t, r, "alice", "pw-alice")
+
+	var page orderListResp
+	fetch := func(query string) {
+		t.Helper()
+		w := doJSON(t, r, http.MethodGet, "/api/user/topup/orders"+query, cookieA, nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("列表应 200，实际 %d body=%s", w.Code, w.Body.String())
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &struct {
+			Data *orderListResp `json:"data"`
+		}{&page}); err != nil {
+			t.Fatalf("解析失败: %v", err)
+		}
+	}
+
+	fetch("?order_no=" + oa.OrderNo)
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].OrderNo != oa.OrderNo {
+		t.Fatalf("精确查询应命中本人该单: total=%d items=%+v", page.Total, page.Items)
+	}
+	// 他人单号：所有权作用域下不可见。
+	fetch("?order_no=" + ob.OrderNo)
+	if page.Total != 0 || len(page.Items) != 0 {
+		t.Fatalf("他人单号应不可见: total=%d items=%d", page.Total, len(page.Items))
+	}
+	// 未知单号：空列表。
+	fetch("?order_no=TPNOTEXIST")
+	if page.Total != 0 || len(page.Items) != 0 {
+		t.Fatalf("未知单号应返回空列表: total=%d", page.Total)
+	}
+	// 无参数：普通分页不受影响（A 仍见自己 1 单）。
+	fetch("")
+	if page.Total != 1 || len(page.Items) != 1 {
+		t.Fatalf("无参数分页应返回本人 1 单: total=%d", page.Total)
+	}
+}
