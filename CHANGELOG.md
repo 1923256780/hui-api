@@ -9,6 +9,27 @@
 
 ### 新增
 
+- M2-wave3 兑换码核销状态机与额度划转：`POST /api/user/topup`（登录用户，事务内原子核销
+  ——条件 UPDATE status 未用→已用 + used_by/used_time 防并发重复兑换，过期码惰性标记
+  status=4 并拒绝，面额入账 users.quota，同事务 topup 日志）；`POST /api/token/:id/assign`
+  （users.quota → tokens.remain_quota/quota 同步增加的转移事务，条件扣减防透支，归属者或
+  管理员可操作，unlimited 令牌拒绝）；`GET /api/user/self`；并发正确性与 billing.Ledger
+  同一模型（12 goroutine 抢同码恰一人成功，-race 全绿）；
+- M2-wave3 令牌预算周期惰性重置：budget_duration（24h/7d/30d/monthly）+ budget_reset_at，
+  转发路径 rollBudget——首次请求 CAS 初始化边界、过期逐窗口步进保相位（monthly 月末钳制）、
+  CAS 复原 remain 并写 budget_reset 日志（并发恰一次）；窗口内消耗受 remain_quota 封顶；
+- M2-wave3 hooks 首批集成：OTLP hook（OTLP/HTTP JSON POST <endpoint>/v1/metrics，累计
+  temporality，duration/tokens/status 三指标，2s 定时导出 + 停机冲刷，失败丢弃计数降级）与
+  webhook hook（POST 事件 JSON 九字段，超时 3s 丢弃计数）；options 白名单新增 `hooks.*`
+  前缀（hooks.enabled/hooks.otlp.endpoint/hooks.webhook.url）；gateway 事件投递（request_id +
+  idempotency_key，completed/failed 路由，defer 兜底 request.failed）；
+- M2-wave3 流中断部分结算（wave1 遗留清偿）：settle 三分支「已发生即已消耗」——usage 有值
+  按用量（partial）、usage 缺失但已写出内容按字节粗估（partial+estimated）、两者皆无全额退款
+  （宁少收不多收不变）；Detail 新增 Partial 字段；日志回填实际服务渠道 ChannelID（wave1
+  遗留一并清偿，日志渠道过滤与看板渠道分布自此生效）；
+- M2-wave3 前端：/console/topup 充值页（余额/累计已用/名下令牌卡片 + 兑换码核销表单 +
+  额度划转表单，对接 topup/self/assign 端点）+ 菜单路由挂载；兑换码状态列补 4=已过期；
+  Settings 新增观测 hooks 组（与后端白名单对齐）；
 - M2-wave2 前端控制台（React 管理台对接管理面 API，交付八页面）：`web/src/api` 客户端
   （fetch credentials:'same-origin'、`{success,message,data}` 包裹解析、ApiError(code/status)
   归一、401 统一跳 /login 且登录接口豁免）；react-router@6 路由（/login + /console 八子路由）；

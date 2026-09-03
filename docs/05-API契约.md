@@ -25,6 +25,8 @@
 | `/api/redemption` | 兑换码批量生成/列表/删除（核销状态机 wave3） | ✅ M2-wave1 |
 | `/api/log` | 请求日志分页查询（user/token/channel/model/时间过滤） | ✅ M2-wave1 |
 | `/api/option` | options 读写（键白名单，写后 Reload() 热生效） | ✅ M2-wave1 |
+| `/api/user/topup` `/api/user/self` | 兑换码核销 / 当前用户信息（登录态即可，非 root） | ✅ M2-wave3 |
+| `/api/token/:id/assign` | 额度划转（用户余额 → 令牌余额，登录态即可） | ✅ M2-wave3 |
 | `/api/status` | 服务状态、版本、schema 版本（无鉴权） | ✅ M0 |
 
 ## 二、契约约定（总体）
@@ -42,7 +44,9 @@
 - [x] M1-wave2：`/v1/messages`、`/v1/messages/count_tokens` 契约细化 + 示例（2026-09-02）
 - [x] M1-wave3：计费错误码（403/503）与计费运行轨键补充（2026-09-02）
 - [x] M2-wave1：管理面契约细化——登录/会话 + 六组端点 + 错误码表（2026-09-03）
-- [ ] M2-wave3：兑换码核销语义（`POST /api/redemption/redeem`）补充
+- [x] M2-wave3：用户自服务端点契约细化——topup/self/assign + hooks 运行轨键与事件投递
+  （核销入口落地为 `POST /api/user/topup` 而非设计稿的 `/api/redemption/redeem`：核销是
+  用户侧动作，归入用户自服务组）（2026-09-03）
 - [ ] M4：管理面 `Idempotency-Key` 头语义复核（当前以 PUT 整对象幂等写替代）
 
 ## 四、转发面契约（M1-wave2 落地，M1-wave3 补计费）
@@ -55,7 +59,7 @@
 - **重试与熔断**：上游错误按类重试（Auth 零重试；RateLimit 指数退避；其余立即换点），重试仅限首字节前，排除集上限 5；重试穷尽或不可重试时透传上游错误（Auth 类包装为 502）。熔断只隔离单渠道（进程内存态）。
 - **请求体限制**：入口请求体超过上限（默认 32MB，运行轨 `relay.max_body_bytes` 可调）本地快速失败 413。
 - **计费**（M1-wave3）：请求前按估算上浮 20% 冻结令牌余额（不足 403 拒绝）；响应完成后按实际 usage 多退少补（补扣允许透支到负数）；上游失败/流中断全额退款；usage 缺失按本地粗估计费并标记 `estimated`（logs.detail 可见）；模型未配价 503 拒绝。
-- **运行轨配置键**：`relay.max_body_bytes`（请求体上限）；`relay.virtual_model_groups`（虚拟模型组 JSON `{"组名":["成员",...]}`，`/v1/models` 只返回组名）；计费键 `billing_setting.billing_mode` / `billing_setting.billing_expr` / `billing_setting.billing_price`（模型名 → 模式声明 / 计费表达式 / 按次单价）与 `ModelRatio` / `CompletionRatio` / `GroupRatio`（classic 回退价与组倍率），管理面写后 Reload() 热生效。
+- **运行轨配置键**：`relay.max_body_bytes`（请求体上限）；`relay.virtual_model_groups`（虚拟模型组 JSON `{"组名":["成员",...]}`，`/v1/models` 只返回组名）；计费键 `billing_setting.billing_mode` / `billing_setting.billing_expr` / `billing_setting.billing_price`（模型名 → 模式声明 / 计费表达式 / 按次单价）与 `ModelRatio` / `CompletionRatio` / `GroupRatio`（classic 回退价与组倍率），管理面写后 Reload() 热生效。观测键（M2-wave3）：`hooks.enabled` / `hooks.otlp.endpoint` / `hooks.webhook.url`（见 5.6）。
 
 ### 4.2 POST /v1/chat/completions（OpenAI 兼容）
 
@@ -123,8 +127,11 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 | `POST /api/channel/test/:id` | - | `{success,status_code,time_ms,message}`；按渠道类型置鉴权头（Anthropic x-api-key，其余 Bearer），10s 超时 |
 | `GET/POST/PUT/DELETE /api/token` | user_id 必填且存在；quota/remain/unlimited/budget_duration/tpm_rpm/tags/group/model_limits/allow_ips/expired_time | 创建响应 `data.key` 为明文（`sk-`+32hex）**仅此一次**；remain 缺省=quota；group 缺省取用户分组再退 default；写后鉴权缓存失效 |
 | `GET/POST/DELETE /api/redemption` | 批量生成 `{count:1..100,name,quota>0,expired_time}` | `data.keys` 明文数组（`redd-`+24hex）仅此一次；key 冲突自动重试，重试穷尽整批拒绝 |
-| `GET /api/log` | 过滤：`user_id/token_id/channel_id/model_name/start_timestamp/end_timestamp`（Unix 秒闭区间） | id 降序；channel_id 过滤待 hook 回填后生效（wave3） |
-| `GET/PUT /api/option` | PUT `{"options":{k:v}}` | 键白名单：`relay.*`/`billing_setting.*` 前缀 + `ModelRatio`/`CompletionRatio`/`GroupRatio`/`ModelRequestRateLimitEnabled/DurationMinutes/Count/SuccessCount/Group` 精确键（拒 `schema_version`）；值长 ≤2048；任一非法整体拒绝；写后返回新 `version` 且配置热生效 |
+| `GET /api/log` | 过滤：`user_id/token_id/channel_id/model_name/start_timestamp/end_timestamp`（Unix 秒闭区间） | id 降序；channel_id 已生效（M2-wave3 日志回填实际服务渠道） |
+| `GET/PUT /api/option` | PUT `{"options":{k:v}}` | 键白名单：`relay.*`/`billing_setting.*`/`hooks.*` 前缀 + `ModelRatio`/`CompletionRatio`/`GroupRatio`/`ModelRequestRateLimitEnabled/DurationMinutes/Count/SuccessCount/Group` 精确键（拒 `schema_version`）；值长 ≤2048；任一非法整体拒绝；写后返回新 `version` 且配置热生效 |
+| `POST /api/user/topup` | `{key}`（登录态） | `{quota_added,user_quota}`；事务原子核销（条件 UPDATE 未用→已用防并发重复）→ 面额入账 → topup 日志；过期码惰性标记 status=4 并 400 `redemption_expired` |
+| `GET /api/user/self` | -（登录态） | 当前用户对象（同用户视图字段，password_hash 序列化豁免） |
+| `POST /api/token/:id/assign` | `{quota>0}`（登录态；归属者或管理员） | `{quota_assigned,remain_quota}`；用户余额 → 令牌 remain+quota 同步增加的转移事务；余额不足 400 `insufficient_quota`；unlimited 令牌 400 拒绝 |
 
 ### 5.3 错误码表（管理面语义错误）
 
@@ -133,10 +140,13 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 | 400 | `invalid_request` | 请求体非法 / 必填缺失 / count 越界 / self_lockout 触发条件不满足等参数问题 |
 | 401 | `invalid_credentials` | 登录口令错误（与账号不存在同文案） |
 | 401 | `unauthorized` | 未登录 / 会话无效 / 篡改 / 过期 / auth_version 不匹配 |
-| 403 | `forbidden` | 非 root 访问管理端点 |
+| 403 | `forbidden` | 非 root 访问管理端点；划转操作非令牌归属者且非管理员 |
 | 403 | `user_disabled` | 已禁用账号登录 |
-| 404 | `not_found` | 路径 id 不存在（或已删除） |
+| 404 | `not_found` | 路径 id 不存在（或已删除）；兑换码不存在 |
 | 409 | `username_conflict` | 用户名重复 |
+| 409 | `redemption_used` | 兑换码已被使用（含并发竞争失败） |
+| 400 | `redemption_expired` / `redemption_voided` | 兑换码已过期 / 已作废 |
+| 400 | `insufficient_quota` | 划转时用户余额不足（管理面语义，与转发面 403 区分归因） |
 | 429 | `rate_limited`（转发面） | 限流触发，响应带 `Retry-After`（见 4.1/限流语义） |
 | 500 | `*_failed` | 存储层写失败（create/update/delete/query_failed） |
 
@@ -158,6 +168,26 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
   误重置；用户编辑自己时 role/status 不渲染表单项，payload 必须原值回传，否则 self_lockout
   检查拦截任何编辑（含改邮箱）。
 - **options 键白名单双侧同步**：系统设置页可编辑键集合与 `internal/api/option.go`
-  allowedOptionKey 对齐（`relay.*`/`billing_setting.*` 前缀 + ModelRatio/CompletionRatio/
+  allowedOptionKey 对齐（`relay.*`/`billing_setting.*`/`hooks.*` 前缀 + ModelRatio/CompletionRatio/
   GroupRatio/ModelRequestRateLimit* 五精确键）；新增可写键必须前后端同步，否则保存即 400
   `option_forbidden`；换皮类键（SystemName 等）后端不支持，前端不提供编辑。
+- **充值页（M2-wave3）**：/console/topup 调 `GET /api/user/self` + `GET /api/token?user_id=`
+  （管理面端点，root 会话）+ `POST /api/user/topup` + `POST /api/token/:id/assign`；兑换码
+  状态枚举补 4=已过期（REDEMPTION_STATUS，与后端惰性标记语义对齐）。
+
+### 5.6 hooks 事件投递契约（M2-wave3）
+
+- **总开关与键**（options，热生效）：`hooks.enabled`（"true" 启用）；`hooks.otlp.endpoint`
+  （如 `http://127.0.0.1:4318`，导出 POST `<endpoint>/v1/metrics`）；`hooks.webhook.url`
+  （事件 POST 推送地址）。
+- **事件模型**：转发面每请求恰投递一事件——`completed`（Data 含 quota/prompt_tokens/
+  completion_tokens/duration_ms/stream，粗估时附 estimated）或 `failed`（Err 非空，如
+  `no_available_channel`/`request_not_completed` 兕底）；公共字段 type/request_id/token_id/
+  channel_id/model/timestamp/idempotency_key（= requestID:eventType，供接收端去重）。
+- **webhook**：JSON POST，超时 3s，失败静默丢弃并计数（不重试、不阻塞转发）。
+- **OTLP**：OTLP/HTTP JSON，累计 temporality（startTime 固定、全量累计）；指标
+  `hui.request.duration_ms`（histogram，ms）/`hui.request.tokens`（histogram，kind=
+  prompt|completion）/`hui.request.status`（monotonic sum，model/outcome 维度）；2s 定时
+  批量导出，失败丢弃计数，停机冲刷；int64 字段按 protobuf JSON 规范以字符串编码。
+- **信任边界**：两 hook 均产生出站请求，目标地址由管理员配置——可达性与安全边界由配置方
+  负责（本机 collector/webhook 接收端属正常用法）。
