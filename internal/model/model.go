@@ -23,6 +23,7 @@ const (
 	RedemptionUnused   = 1 // 未使用
 	RedemptionRedeemed = 2 // 已核销
 	RedemptionVoided   = 3 // 已作废
+	RedemptionExpired  = 4 // 已过期（核销时发现超期的惰性标记，M2-wave3）
 )
 
 // EpochForever 表示“永不过期”的时间哨兵值（expired_time 语义）。

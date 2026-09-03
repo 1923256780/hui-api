@@ -64,6 +64,10 @@ func (h *Handler) Register(r gin.IRouter) {
 	g := r.Group("/api")
 	g.POST("/user/login", h.Login)
 	g.POST("/user/logout", h.Logout)
+	// 登录用户自服务端点（M2-wave3）：仅要求登录，不要求 root（docs/05）。
+	g.POST("/user/topup", h.RequireAuth, h.TopupRedeem)
+	g.GET("/user/self", h.RequireAuth, h.GetSelf)
+	g.POST("/token/:id/assign", h.RequireAuth, h.AssignTokenQuota)
 	h.registerManaged(g.Group("", h.RequireRoot))
 }
 
