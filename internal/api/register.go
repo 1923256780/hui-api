@@ -72,6 +72,11 @@ func FeatureFlags(rt *config.Runtime) gin.H {
 			"linuxdo": oauthProviderConfigured(rt, ProviderLinuxDO),
 			"oidc":    oauthProviderConfigured(rt, ProviderOIDC),
 		},
+		// 在线充值网关开关（M3-wave3，docs/05 §5.10）：前端据此渲染充值区。
+		"topup": gin.H{
+			"epay":   rt.GetBool(OptionKeyEpayEnabled, false),
+			"stripe": rt.GetBool(OptionKeyStripeEnabled, false),
+		},
 	}
 }
 
