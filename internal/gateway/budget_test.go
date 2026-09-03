@@ -134,6 +134,8 @@ func TestBudgetRollOnExpired(t *testing.T) {
 		t.Fatalf("remain 应复原后扣本次实结（99000,100000]，实际 %d", row.RemainQuota)
 	}
 
+	// 断言日志前先排空异步日志写盘（batch 攒批窗口 200ms，不排空存在未落库抖动）。
+	g.Close()
 	logs := budgetLogs(t, st)
 	if len(logs) != 1 {
 		t.Fatalf("应恰好 1 条重置日志，实际 %d 条", len(logs))
@@ -221,6 +223,8 @@ func TestBudgetRollMonthly(t *testing.T) {
 	if row.BudgetResetAt != want.Unix() {
 		t.Fatalf("monthly 边界应步进到 %d，实际 %d", want.Unix(), row.BudgetResetAt)
 	}
+	// 排空异步日志后断言（同 TestBudgetRollOnExpired）。
+	g.Close()
 	if len(budgetLogs(t, st)) != 1 {
 		t.Fatalf("应恰好 1 条重置日志")
 	}
@@ -267,6 +271,10 @@ func TestBudgetConcurrentSingleReset(t *testing.T) {
 	if row.BudgetResetAt != old+7*24*3600 {
 		t.Fatalf("reset_at 应为 old+7d，实际 %d", row.BudgetResetAt)
 	}
+	// wave2 交接遗留加固：budget 日志走异步批量落库（攒批窗口 200ms），并发下
+	// wg.Wait() 后立即查库可能尚未 flush，先 Close 排空（与 logRowsAfterClose
+	// 同一确定性语义；Close 幂等，与 t.Cleanup 双重调用安全）再断言。
+	g.Close()
 	if n := len(budgetLogs(t, st)); n != 1 {
 		t.Fatalf("并发下应恰好 1 条重置日志，实际 %d 条", n)
 	}
