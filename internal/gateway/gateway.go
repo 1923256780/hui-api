@@ -274,6 +274,7 @@ func (g *Gateway) Serve(c *gin.Context, proto relay.Protocol) {
 		detail.CompRatio = price.CompletionRatio
 	}
 	logDone := false
+	logChannel := int64(0) // 实际服务的渠道（pick 后回填；兜底路径为 0）
 	submitLog := func(prompt, completion, quota int, d billing.Detail) {
 		if logDone {
 			return
@@ -282,6 +283,7 @@ func (g *Gateway) Serve(c *gin.Context, proto relay.Protocol) {
 		g.logs.Submit(billing.LogRecord{
 			UserID:           tok.UserID,
 			TokenID:          tok.ID,
+			ChannelID:        logChannel,
 			Protocol:         proto.Name(),
 			ModelName:        pr.Model,
 			PromptTokens:     prompt,
@@ -390,6 +392,7 @@ func (g *Gateway) Serve(c *gin.Context, proto relay.Protocol) {
 		// ---- 8. 2xx：协议适配层转发（流式逐事件 flush / 非流式透传）+ 计费结算。
 		// 从此处起首字节即将写出，任何失败都不再重试。
 		g.breaker.OnSuccess(ch.ID)
+		logChannel = ch.ID
 		usage, respErr := proto.Respond(c, resp, pr)
 		if respErr != nil {
 			log.Printf("[relay] 渠道 %d 响应转发失败 model=%s: %v", ch.ID, pr.Model, respErr)
@@ -433,8 +436,9 @@ func (g *Gateway) Serve(c *gin.Context, proto relay.Protocol) {
 }
 
 // settle 是 Respond 之后的统一结算：成功按实际 usage 多退少补；usage 缺失但有
-// 正常内容 → 本地粗估并标记 estimated；转发失败/流中断 → 全额退款并标记 aborted
-// （docs/04 第三、四节）。返回实结 quota 与落库明细。
+// 正常内容 → 本地粗估并标记 estimated；流中断/转发失败按「已发生即已消耗」
+// 部分结算（usage 有值按用量、否则按已写字节粗估，标记 partial），仅当无任何
+// 消耗证据时才全额退款（docs/04 第三、四节）。返回实结 quota 与落库明细。
 func (g *Gateway) settle(tok *model.Token, price *billing.ModelPrice, group string,
 	frozen int64, raw []byte, c *gin.Context, usage relay.Usage, respErr error) (int64, billing.Detail) {
 
@@ -452,60 +456,103 @@ func (g *Gateway) settle(tok *model.Token, price *billing.ModelPrice, group stri
 	detail.CacheRead = min(max(usage.CacheReadTokens, 0), usage.PromptTokens)
 	detail.BilledIn = usage.PromptTokens - detail.CacheRead
 
-	// ---- 流中断 / 转发失败：全额退款（宁可少收不多收）。
+	// ---- 流中断 / 转发失败（M2-wave3 部分结算）：已发生即已消耗——
+	//   usage 有值 → 按实际用量结算（标记 partial，与成功路径同口径多退少补）；
+	//   usage 缺失但已写出内容 → 字节粗估（partial + estimated）；
+	//   两者皆无（如非流式读体失败）→ 全额退款（宁可少收）。
 	if respErr != nil {
-		if frozen > 0 {
-			if err := g.ledger.RefundFull(tok.ID, tok.UserID, frozen); err != nil {
-				log.Printf("[billing] 流中断退款失败 token=%d frozen=%d: %v", tok.ID, frozen, err)
-			}
-		}
 		detail.Aborted = true
-		detail.RefundFull = frozen > 0
-		return 0, detail
+		switch {
+		case usage.PromptTokens > 0 || usage.CompletionTokens > 0:
+			detail.Partial = true
+			actual, err := g.chargeAndSettle(tok, price, group, frozen, billing.Usage{
+				Input:      usage.PromptTokens,
+				Completion: usage.CompletionTokens,
+				CacheRead:  usage.CacheReadTokens,
+			})
+			if err != nil {
+				return g.refundFullDetail(price.Model, tok, frozen, detail, err)
+			}
+			return actual, detail
+		case c.Writer.Size() > 0:
+			detail.Partial = true
+			detail.Estimated = true
+			est := billing.Usage{
+				Input:      len(raw) / billing.BytesPerTokenEstimate,
+				Completion: c.Writer.Size() / billing.BytesPerTokenEstimate,
+			}
+			detail.BilledIn = est.Input
+			actual, err := g.chargeAndSettle(tok, price, group, frozen, est)
+			if err != nil {
+				return g.refundFullDetail(price.Model, tok, frozen, detail, err)
+			}
+			return actual, detail
+		default:
+			if frozen > 0 {
+				if err := g.ledger.RefundFull(tok.ID, tok.UserID, frozen); err != nil {
+					log.Printf("[billing] 流中断退款失败 token=%d frozen=%d: %v", tok.ID, frozen, err)
+				}
+			}
+			detail.RefundFull = frozen > 0
+			return 0, detail
+		}
 	}
 
-	// ---- 结算计费。
+	// ---- 正常结算计费（usage 缺失但有正常内容时字节粗估并标记 estimated，
+	// 粗估口径偏保守：缓存折扣不可知，按全价输入计）。
 	var actual int64
 	var err error
-	switch {
-	case usage.PromptTokens == 0 && usage.CompletionTokens == 0:
-		// usage 缺失但有正常内容：本地粗估（输入按请求体、输出按已写字节，4B/token）
-		// 并标记 estimated。粗估口径偏保守（缓存折扣不可知，按全价输入计）。
+	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 {
 		est := billing.Usage{
 			Input:      len(raw) / billing.BytesPerTokenEstimate,
 			Completion: c.Writer.Size() / billing.BytesPerTokenEstimate,
 		}
-		actual, err = g.price.Charge(price, group, est)
 		detail.Estimated = true
 		detail.BilledIn = est.Input
-	default:
-		actual, err = g.price.Charge(price, group, billing.Usage{
+		actual, err = g.chargeAndSettle(tok, price, group, frozen, est)
+	} else {
+		actual, err = g.chargeAndSettle(tok, price, group, frozen, billing.Usage{
 			Input:      usage.PromptTokens,
 			Completion: usage.CompletionTokens,
 			CacheRead:  usage.CacheReadTokens,
 		})
 	}
 	if err != nil {
-		// 计费求值失败（理论不可达：Lookup 已校验表达式）。全额退款，宁可少收。
-		log.Printf("[billing] 结算计费失败(模型 %s): %v", price.Model, err)
-		if frozen > 0 {
-			if err := g.ledger.RefundFull(tok.ID, tok.UserID, frozen); err != nil {
-				log.Printf("[billing] 结算失败退款异常 token=%d: %v", tok.ID, err)
-			}
-		}
-		detail.Aborted = true
-		detail.RefundFull = frozen > 0
-		detail.Err = "settle_charge_failed"
-		return 0, detail
+		return g.refundFullDetail(price.Model, tok, frozen, detail, err)
 	}
+	return actual, detail
+}
 
-	// ---- 多退少补（unlimited 令牌跳过账本：冻结与补扣均不记账，日志仍记实结 quota）。
+// chargeAndSettle 按给定用量计费并对非 unlimited 令牌多退少补（unlimited 跳过
+// 账本：冻结与补扣均不记账，日志仍记实结 quota）。
+func (g *Gateway) chargeAndSettle(tok *model.Token, price *billing.ModelPrice, group string,
+	frozen int64, u billing.Usage) (int64, error) {
+	actual, err := g.price.Charge(price, group, u)
+	if err != nil {
+		return 0, err
+	}
 	if !tok.UnlimitedQuota {
 		if err := g.ledger.Settle(tok.ID, tok.UserID, frozen, actual); err != nil {
 			log.Printf("[billing] 多退少补失败 token=%d frozen=%d actual=%d: %v", tok.ID, frozen, actual, err)
 		}
 	}
-	return actual, detail
+	return actual, nil
+}
+
+// refundFullDetail 计费求值失败的全额退款兜底（理论不可达：Lookup 已校验表达式），
+// 返回 0 实结与带错误标记的明细。
+func (g *Gateway) refundFullDetail(modelName string, tok *model.Token, frozen int64,
+	detail billing.Detail, cause error) (int64, billing.Detail) {
+	log.Printf("[billing] 结算计费失败(模型 %s): %v，走全额退款兜底", modelName, cause)
+	if frozen > 0 {
+		if err := g.ledger.RefundFull(tok.ID, tok.UserID, frozen); err != nil {
+			log.Printf("[billing] 结算失败退款异常 token=%d: %v", tok.ID, err)
+		}
+	}
+	detail.Aborted = true
+	detail.RefundFull = frozen > 0
+	detail.Err = "settle_charge_failed"
+	return 0, detail
 }
 
 // logPromptTokens 返回日志应记录的输入 tokens：estimated 粗估值，否则上游原值。

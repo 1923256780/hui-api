@@ -9,6 +9,7 @@ import (
 
 	"github.com/1923256780/hui-api/internal/billing"
 	"github.com/1923256780/hui-api/internal/model"
+	"github.com/1923256780/hui-api/internal/relay/anthropic"
 	"github.com/1923256780/hui-api/internal/store"
 )
 
@@ -142,8 +143,9 @@ func TestGatewaySettleOvercharge(t *testing.T) {
 	}
 }
 
-// TestGatewayStreamAbortRefund 流中断：Respond 报错 → 全额退还冻结并标记 aborted。
-func TestGatewayStreamAbortRefund(t *testing.T) {
+// TestGatewayStreamAbortPartialEstimated 流中断（usage 缺失但已写出内容）：
+// 字节粗估按已消耗部分结算，标记 aborted+partial+estimated，不再全额退款。
+func TestGatewayStreamAbortPartialEstimated(t *testing.T) {
 	g, st, _ := newTestGateway(t, tieredOptions())
 	plain := seedQuotaToken(t, st, 100000)
 	// 声明大 Content-Length 但只写一个事件即断连 → 客户端 unexpected EOF（流中断）。
@@ -161,10 +163,93 @@ func TestGatewayStreamAbortRefund(t *testing.T) {
 		t.Fatalf("流式响应头已写出应 200，实际 %d", w.Code)
 	}
 
+	// 部分结算：已写内容被粗估收账，余额低于满额但未扣光。
+	tok := reloadToken(t, st, plain)
+	if tok.RemainQuota >= 100000 || tok.RemainQuota <= 90000 {
+		t.Fatalf("应按已写内容粗估部分结算（90000,100000），实际 %d", tok.RemainQuota)
+	}
+
+	rows := logRowsAfterClose(t, g, st)
+	if len(rows) != 1 {
+		t.Fatalf("应落库 1 条日志，实际 %d", len(rows))
+	}
+	d := decodeLogDetail(t, rows[0])
+	if !d.Aborted || !d.Partial || !d.Estimated || d.RefundFull {
+		t.Fatalf("应标记 aborted+partial+estimated 且无全额退款: %+v", d)
+	}
+	if rows[0].Quota <= 0 {
+		t.Fatalf("部分结算实结应大于 0，实际 %d", rows[0].Quota)
+	}
+}
+
+// TestGatewayStreamAbortPartialUsage 流中断（usage 已知：anthropic message_start
+// 先携带输入用量）→ 按实际用量部分结算，标记 aborted+partial（非粗估）。
+func TestGatewayStreamAbortPartialUsage(t *testing.T) {
+	g, st, _ := newTestGateway(t, tieredOptions())
+	plain := seedQuotaToken(t, st, 100000)
+	// message_start 带输入 usage 后声明大 Content-Length 断连 → Respond 报错
+	// 但 usage.PromptTokens 已捕获（部分结算口径的 usage 证据）。
+	up, _ := fakeUpstream(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.Header().Set("Content-Length", "4096")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":88,\"output_tokens\":1}}}\n\n")
+	})
+	seedChannel(t, st, model.Channel{Name: "up", Type: model.ChannelTypeAnthropic,
+		BaseURL: up.URL, Key: "k", Models: "m1"})
+
+	body := []byte(`{"model":"m1","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	c, w := ginCtx(t, http.MethodPost, "/v1/messages", body,
+		// Header 字面量 key 需 canonical 形式（Get 按 canonical 查找）。
+		http.Header{"X-Api-Key": []string{plain}})
+	g.Serve(c, anthropic.New())
+	if w.Code != http.StatusOK {
+		t.Fatalf("流式响应头已写出应 200，实际 %d body=%s", w.Code, w.Body.String())
+	}
+
+	rows := logRowsAfterClose(t, g, st)
+	if len(rows) != 1 {
+		t.Fatalf("应落库 1 条日志，实际 %d", len(rows))
+	}
+	d := decodeLogDetail(t, rows[0])
+	if !d.Aborted || !d.Partial || d.RefundFull || d.Estimated {
+		t.Fatalf("应标记 aborted+partial（usage 口径）且非粗估/退款: %+v", d)
+	}
+	if rows[0].PromptTokens != 88 {
+		t.Fatalf("应按 message_start 输入用量记账，实际 %d", rows[0].PromptTokens)
+	}
+	if rows[0].Quota <= 0 {
+		t.Fatalf("部分结算实结应大于 0，实际 %d", rows[0].Quota)
+	}
+	tok := reloadToken(t, st, plain)
+	if tok.RemainQuota >= 100000 {
+		t.Fatalf("余额应扣减部分结算额，实际 %d", tok.RemainQuota)
+	}
+}
+
+// TestGatewayStreamAbortRefund 中断且无任何消耗证据（非流式读体失败、零写入）：
+// 全额退还冻结并标记 aborted+refund_full，实结 0（宁可少收）。
+func TestGatewayStreamAbortRefund(t *testing.T) {
+	g, st, _ := newTestGateway(t, tieredOptions())
+	plain := seedQuotaToken(t, st, 100000)
+	// 非流式：声明大 Content-Length 但少写 → io.ReadAll unexpected EOF，
+	// Respond 报错且客户端未写任何字节（无消耗证据）。
+	up, _ := fakeUpstream(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "4096")
+		_, _ = io.WriteString(w, `{"id":"c1"}`)
+	})
+	seedChannel(t, st, model.Channel{Name: "up", Type: model.ChannelTypeOpenAICompatible,
+		BaseURL: up.URL, Key: "k", Models: "m1"})
+
+	w := postChat(t, g, plain, []byte(`{"model":"m1","messages":[{"role":"user","content":"hi"}]}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("客户端未写出应不写状态，Recorder 默认 200，实际 %d", w.Code)
+	}
+
 	// 全额退款：余额恢复到冻结前。
 	tok := reloadToken(t, st, plain)
 	if tok.RemainQuota != 100000 {
-		t.Fatalf("流中断应全额退款，余额应恢复 100000，实际 %d", tok.RemainQuota)
+		t.Fatalf("零写入中断应全额退款，余额应恢复 100000，实际 %d", tok.RemainQuota)
 	}
 
 	rows := logRowsAfterClose(t, g, st)
@@ -172,11 +257,11 @@ func TestGatewayStreamAbortRefund(t *testing.T) {
 		t.Fatalf("应落库 1 条 aborted 日志，实际 %d", len(rows))
 	}
 	d := decodeLogDetail(t, rows[0])
-	if !d.Aborted || !d.RefundFull {
-		t.Fatalf("流中断日志应标记 aborted+refund_full：%+v", d)
+	if !d.Aborted || !d.RefundFull || d.Partial {
+		t.Fatalf("零写入中断应标记 aborted+refund_full 且非 partial: %+v", d)
 	}
 	if rows[0].Quota != 0 {
-		t.Fatalf("流中断实结应为 0，实际 %d", rows[0].Quota)
+		t.Fatalf("零写入中断实结应为 0，实际 %d", rows[0].Quota)
 	}
 }
 

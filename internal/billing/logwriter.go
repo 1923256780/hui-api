@@ -37,7 +37,8 @@ type Detail struct {
 	CacheRead  int     `json:"cache_read_tokens,omitempty"`   // 缓存读 tokens（prompt 的子集）
 	BilledIn   int     `json:"billed_input_tokens,omitempty"` // 表达式变量 p = prompt - cache
 	Estimated  bool    `json:"estimated,omitempty"`           // usage 缺失，本地粗估
-	Aborted    bool    `json:"aborted,omitempty"`             // 失败/流中断（退款终态）
+	Aborted    bool    `json:"aborted,omitempty"`             // 失败/流中断（退款或部分结算终态）
+	Partial    bool    `json:"partial,omitempty"`             // 部分结算：流中断按已消耗收取（M2-wave3）
 	RefundFull bool    `json:"refund_full,omitempty"`         // 全额退款标记
 	Unlimited  bool    `json:"unlimited,omitempty"`           // 令牌不限额（跳过账本）
 	Err        string  `json:"error,omitempty"`               // 计费异常摘要（宁可少收路径）
