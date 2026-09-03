@@ -4,6 +4,12 @@
 //     （options 键 ModelRequestRateLimit*，行业通用命名；分组配置覆盖全局、共用周期）；
 //   - 令牌级 TPM/RPM：滑动窗口累计 tokens 消耗与请求次数（tokens.tpm_rpm JSON）。
 //
+// 记账语义两种（M4 评审修复引入失败维度）：AllowRequest「放行即记账」适用
+// 于每次放行都有真实成本的场景（转发、发码）；AllowFailures + TallyFail
+// 「失败记账」适用于登录/验码类端点——成功路径零消耗（NAT 共出口 IP 的多
+// 用户正常登录不受历史成功影响），连续失败才推进窗口（爆破防护保持）；
+// 验码类端点还可在验证通过后经 Reset 清零历史失败（成功即身份成立）。
+//
 // 存储模型：sync.Map 按 key 分桶，每桶独立互斥锁 + 按时间追加的事件序列；
 // 访问时惰性淘汰窗口外事件；条目总数超上限时对空闲桶做 TTL 清扫（LRU 近似），
 // 保证极端 key 基数（海量 IP / 令牌）下内存有界。判定与记录在同一次调用内完成，
@@ -52,6 +58,7 @@ type bucket struct {
 	reqs       []time.Time // 请求时间戳（请求数维度）
 	succs      []time.Time // 成功完成时间戳（成功数维度）
 	tokens     []tokenUse  // tokens 消耗事件（TPM 维度）
+	fails      []time.Time // 失败记账时间戳（AllowFailures/TallyFail 维度）
 }
 
 type tokenUse struct {
@@ -95,6 +102,54 @@ func (l *Limiter) RecordSuccess(key string, window time.Duration) {
 	b.lastAccess = now
 	b.pruneLocked(now, window)
 	b.succs = append(b.succs, now)
+}
+
+// AllowFailures 以失败次数为预算维度预检（纯判定，不记账）：窗口内失败数
+// 未达 max 即放行。与 AllowRequest 的「放行即记账」不同，记账由调用方在
+// 确认失败（凭据校验失败/验码不匹配等）后经 TallyFail 完成——成功响应不
+// 消耗预算，失败才推进窗口（登录爆破防护语义：连续失败仍受限，正常登录
+// 不受历史成功拖累）。max<=0 表示不限；拒绝时返回建议 Retry-After（恒 >0）。
+func (l *Limiter) AllowFailures(key string, window time.Duration, max int) (bool, time.Duration) {
+	if max <= 0 {
+		return true, 0
+	}
+	b := l.bucketFor(key)
+	now := l.now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.lastAccess = now
+	b.pruneLocked(now, window)
+	if len(b.fails) >= max {
+		return false, untilFree(now, window, b.fails[0])
+	}
+	return true, 0
+}
+
+// TallyFail 记录一次失败（失败预算维度，消耗一次 AllowFailures 配额）。
+func (l *Limiter) TallyFail(key string, window time.Duration) {
+	b := l.bucketFor(key)
+	now := l.now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.lastAccess = now
+	b.pruneLocked(now, window)
+	b.fails = append(b.fails, now)
+}
+
+// Reset 清空 key 的失败记账预算（验证通过后调用）：验码类端点凭「验证通过
+// 即身份成立」清零历史失败（如 TOTP enable/disable 正确码通过后），后续
+// 尝试从零计数；登录类不 Reset（成功不清账，爆破防护不受正常登录重置）。
+// key 从未记账时为幂等 no-op。
+func (l *Limiter) Reset(key string) {
+	v, ok := l.windows.Load(key)
+	if !ok {
+		return
+	}
+	b := v.(*bucket)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.lastAccess = l.now()
+	b.fails = nil
 }
 
 // AllowTokens 判定令牌级 TPM/RPM 是否放行（放行即记录一次请求时间戳，RPM 维度）。
@@ -218,6 +273,7 @@ func (l *Limiter) sweepIdle() {
 func (b *bucket) pruneLocked(now time.Time, window time.Duration) {
 	b.reqs = pruneTimes(b.reqs, now, window)
 	b.succs = pruneTimes(b.succs, now, window)
+	b.fails = pruneTimes(b.fails, now, window)
 	cut := now.Add(-window)
 	idx := 0
 	for idx < len(b.tokens) && b.tokens[idx].at.Before(cut) {
