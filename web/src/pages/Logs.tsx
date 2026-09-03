@@ -1,6 +1,8 @@
-// Logs 请求日志：分页表格（时间/用户/渠道/模型/tokens/quota/耗时）、筛选
-//（用户/渠道下拉 + 模型下拉（AutoComplete：选项从当前页数据去重生成，
-// 支持手输精确模型名）+ 时间区间）、明细展开（detail 计费依据 JSON 美化）。
+// Logs 请求日志（M3-wave4 按角色取数）：root 走管理面 /api/log（全量 +
+// 用户/渠道/模型/时间筛选）；普通用户走登录态 /api/log/mine（服务端会话
+// 作用域 + logMineView 白名单——响应无 user_id/channel_id 字段，前端相应
+// 隐藏用户/渠道筛选与列，普通用户不请求管理面下拉数据源）。分页表格 +
+// 明细展开（detail 计费依据 JSON 美化），两种视角的公共列与交互不变。
 import { useCallback, useEffect, useState } from 'react'
 import {
   App,
@@ -18,11 +20,15 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import { ReloadOutlined, SearchOutlined } from '@ant-design/icons'
 import dayjs, { type Dayjs } from 'dayjs'
-import { ApiError, api } from '../api/client'
-import type { ChannelView, LogEntry, Paged, UserInfo } from '../api/types'
+import { ApiError, api, getSession, type Query } from '../api/client'
+import type { ChannelView, LogEntry, LogMineEntry, Paged, UserInfo } from '../api/types'
 import { prettyJSON, quotaToDollar } from '../api/format'
 
 const { Text } = Typography
+
+// LogRow 两种视角的行联合：/api/log 条目（LogEntry，root）与 /api/log/mine
+// 条目（LogMineEntry，白名单无 user_id/channel_id）；公共列 dataIndex 一致。
+type LogRow = LogEntry | LogMineEntry
 
 interface FilterForm {
   user_id?: number
@@ -33,7 +39,10 @@ interface FilterForm {
 
 export default function LogsPage() {
   const { message } = App.useApp()
-  const [data, setData] = useState<Paged<LogEntry> | null>(null)
+  // 角色决定数据端点与展示面：会话元数据由 ConsoleLayout 探针（/api/user/self）
+  // 刷新过，role 以服务端为准；mount 时再读一次兜底直访场景。
+  const [isAdmin, setIsAdmin] = useState(() => getSession()?.role === 100)
+  const [data, setData] = useState<Paged<LogRow> | null>(null)
   const [loading, setLoading] = useState(false)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
@@ -48,6 +57,9 @@ export default function LogsPage() {
   const [filters, setFilters] = useState<Partial<FilterForm>>({})
 
   useEffect(() => {
+    const admin = getSession()?.role === 100
+    setIsAdmin(admin)
+    if (!admin) return // 普通用户不请求管理面数据源（/api/user、/api/channel 403）
     api
       .get<Paged<UserInfo>>('/api/user', { page: 1, page_size: 100 })
       .then((d) => setUsers(d.items))
@@ -63,15 +75,18 @@ export default function LogsPage() {
       setLoading(true)
       try {
         const range = f.range
-        const d = await api.get<Paged<LogEntry>>('/api/log', {
+        // 按角色取端点：root 管理面全量（user/channel 过滤可用）；普通用户
+        // 登录态个人视角（服务端强制会话作用域，user/channel 过滤不传）。
+        const query: Query = {
           page: p,
           page_size: ps,
-          user_id: f.user_id,
-          channel_id: f.channel_id,
+          user_id: isAdmin ? f.user_id : undefined,
+          channel_id: isAdmin ? f.channel_id : undefined,
           model_name: f.model_name?.trim() || undefined,
           start_timestamp: range?.[0] ? range[0].startOf('second').unix() : undefined,
           end_timestamp: range?.[1] ? range[1].startOf('second').unix() : undefined,
-        })
+        }
+        const d = await api.get<Paged<LogRow>>(isAdmin ? '/api/log' : '/api/log/mine', query)
         setData(d)
         // 当前页模型名去重并入筛选选项（排序保持下拉可检索）。
         setModelOptions((prev) => {
@@ -89,7 +104,7 @@ export default function LogsPage() {
         setLoading(false)
       }
     },
-    [page, pageSize, filters, message],
+    [page, pageSize, filters, isAdmin, message],
   )
 
   useEffect(() => {
@@ -110,7 +125,9 @@ export default function LogsPage() {
     void load(1, pageSize, {})
   }
 
-  const columns: ColumnsType<LogEntry> = [
+  // 列定义：root 保留管理视角的用户/渠道列（行为不变）；普通用户按
+  // logMineView 白名单收窄（无用户/渠道列）。
+  const columns: ColumnsType<LogRow> = [
     { title: 'ID', dataIndex: 'id', width: 76 },
     {
       title: '时间',
@@ -118,9 +135,18 @@ export default function LogsPage() {
       width: 160,
       render: (v: number) => dayjs(v * 1000).format('MM-DD HH:mm:ss'),
     },
-    { title: '用户', dataIndex: 'user_id', width: 90, render: (v: number) => `#${v}` },
+    ...(isAdmin
+      ? ([
+          { title: '用户', dataIndex: 'user_id', width: 90, render: (v: number) => `#${v}` },
+          {
+            title: '渠道',
+            dataIndex: 'channel_id',
+            width: 90,
+            render: (v: number) => (v > 0 ? `#${v}` : '-'),
+          },
+        ] as ColumnsType<LogRow>)
+      : []),
     { title: '令牌', dataIndex: 'token_id', width: 90, render: (v: number) => `#${v}` },
-    { title: '渠道', dataIndex: 'channel_id', width: 90, render: (v: number) => (v > 0 ? `#${v}` : '-') },
     {
       title: '协议',
       dataIndex: 'protocol',
@@ -154,26 +180,30 @@ export default function LogsPage() {
     <div>
       <Card style={{ marginBottom: 16 }}>
         <Form<FilterForm> form={form} layout="inline" onFinish={() => void applyFilters()}>
-          <Form.Item name="user_id" label="用户">
-            <Select
-              allowClear
-              showSearch
-              optionFilterProp="label"
-              placeholder="全部"
-              style={{ width: 140 }}
-              options={users.map((u) => ({ value: u.id, label: u.username }))}
-            />
-          </Form.Item>
-          <Form.Item name="channel_id" label="渠道">
-            <Select
-              allowClear
-              showSearch
-              optionFilterProp="label"
-              placeholder="全部"
-              style={{ width: 140 }}
-              options={channels.map((c) => ({ value: c.id, label: c.name }))}
-            />
-          </Form.Item>
+          {isAdmin && (
+            <Form.Item name="user_id" label="用户">
+              <Select
+                allowClear
+                showSearch
+                optionFilterProp="label"
+                placeholder="全部"
+                style={{ width: 140 }}
+                options={users.map((u) => ({ value: u.id, label: u.username }))}
+              />
+            </Form.Item>
+          )}
+          {isAdmin && (
+            <Form.Item name="channel_id" label="渠道">
+              <Select
+                allowClear
+                showSearch
+                optionFilterProp="label"
+                placeholder="全部"
+                style={{ width: 140 }}
+                options={channels.map((c) => ({ value: c.id, label: c.name }))}
+              />
+            </Form.Item>
+          )}
           <Form.Item name="model_name" label="模型">
             <AutoComplete
               allowClear
@@ -199,7 +229,7 @@ export default function LogsPage() {
         </Form>
       </Card>
 
-      <Table<LogEntry>
+      <Table<LogRow>
         rowKey="id"
         loading={loading}
         columns={columns}

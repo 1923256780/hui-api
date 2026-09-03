@@ -198,3 +198,20 @@ export interface AffSummary {
   aff_history_quota: number
   rebate_percent: number
 }
+
+// GET /api/log/mine 条目（M3-wave4）：个人视角白名单字段——无 user_id
+//（恒为会话用户）与 channel_id（渠道归属属管理面语义）；其余与 /api/log
+// 条目同形，明细 detail 为计费依据 JSON。
+export interface LogMineEntry {
+  id: number
+  token_id: number
+  protocol: string
+  model_name: string
+  prompt_tokens: number
+  completion_tokens: number
+  quota: number
+  use_time: number
+  is_stream: boolean
+  detail: string
+  created_time: number
+}
