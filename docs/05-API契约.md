@@ -146,3 +146,18 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 - **身份键**：全局 `g|<ClientIP>`；分组 `grp:<组名>|<ClientIP>`；令牌 TPM/RPM `tok:<token_id>`（滑动窗口，`tpm_rpm` JSON 如 `{"tpm":100000,"rpm":30}`）。
 - **行为**：超限返回 429 + `Retry-After`（秒）；被拒请求不记录、不消耗配额、不计入上游熔断失败计数；成功数在 Respond 成功后记录（`RecordSuccess`）。
 
+### 5.5 前端控制台对接注记（M2-wave2）
+
+- **会话与 401**：管理面请求一律携带同源签名 cookie（fetch `credentials: 'same-origin'`）；
+  前端不在 localStorage 存会话凭据，仅存展示用元数据（用户名/角色）。api 客户端对 401 统一
+  跳转 /login（登录接口自身豁免，防口令错误误跳）。
+- **鉴权双体系**：`/v1/models` 等转发面端点走 Bearer 令牌鉴权，与管理台会话无关——模型广场
+  页需手工输入令牌（仅存 localStorage）。「管理员聚合查询」端点属新契约，本版未实现。
+- **PUT 整对象写的前端义务**：PUT 全量覆盖，前端表单必须显式携带全部业务字段（含零值）——
+  渠道 key 留空=保旧（脱敏回显 `sk-***XXXX` 不可回填）；令牌编辑显式携带 remain_quota 防
+  误重置；用户编辑自己时 role/status 不渲染表单项，payload 必须原值回传，否则 self_lockout
+  检查拦截任何编辑（含改邮箱）。
+- **options 键白名单双侧同步**：系统设置页可编辑键集合与 `internal/api/option.go`
+  allowedOptionKey 对齐（`relay.*`/`billing_setting.*` 前缀 + ModelRatio/CompletionRatio/
+  GroupRatio/ModelRequestRateLimit* 五精确键）；新增可写键必须前后端同步，否则保存即 400
+  `option_forbidden`；换皮类键（SystemName 等）后端不支持，前端不提供编辑。

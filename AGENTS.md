@@ -18,7 +18,7 @@
 | internal/channel/ | 渠道路由与熔断（M1 规划） |
 | internal/billing/ | 计费与配额内核（M2 规划） |
 | internal/store/ | GORM + SQLite 存储层与迁移（M1 规划） |
-| web/ | React 管理台（M3 规划） |
+| web/ | React 管理台（M2-wave2 落地：api 客户端/八页面，go:embed 嵌入） |
 | docs/ | 全部设计与运维文档，入口 INDEX.md |
 | docs/decisions/ | ADR 架构决策记录 |
 | scripts/ | 构建、检查脚本 |
@@ -32,7 +32,7 @@
 - 静态检查：`go vet ./...`
 - 本地运行：`go run ./cmd/hui-api -addr :3100`，健康检查：`curl http://127.0.0.1:3100/health`
 - 一键脚本：`powershell -ExecutionPolicy Bypass -File scripts/build.ps1 verify`（build/test/vet/run/verify）
-- 前端（web/ 目录存在后）：`cd web; npm ci; npm run build`，产物经 go:embed 嵌入二进制。
+- 前端（web/ 目录存在后）：`cd web; npm ci; npm run lint; npm run build`，产物经 go:embed 嵌入二进制。
 
 ## 4. 代码风格
 

@@ -9,6 +9,24 @@
 
 ### 新增
 
+- M2-wave2 前端控制台（React 管理台对接管理面 API，交付八页面）：`web/src/api` 客户端
+  （fetch credentials:'same-origin'、`{success,message,data}` 包裹解析、ApiError(code/status)
+  归一、401 统一跳 /login 且登录接口豁免）；react-router@6 路由（/login + /console 八子路由）；
+  AntD zh_CN locale + App 上下文（message/modal 经 useApp）；ConsoleLayout 会话探针 +
+  侧边栏八菜单 + 登出（清 cookie 与本地会话元数据）；
+- M2-wave2 八页面：数据看板（今日请求/消耗/tokens 卡片 + 模型分布表，日志分页拉取上限
+  1000 条并提示截断口径）；渠道（分页/状态/模型数列、抽屉整对象写、param_override JSON
+  对象校验、key 留空=保旧（脱敏回显不回填）、连通测试 status_code/time_ms 行内展示、删除
+  确认）；令牌（额度进度条/分组/限流列/过期、tpm_rpm/tags 结构化转 JSON、创建后 sk- 明文
+  一次性弹窗（复制+仅此一次警示）、编辑显式携带 remain_quota 防误重置）；用户（角色/分组/
+  余额列、创建口令必填、编辑自己 role/status 原值回传对齐 self_lockout、管理员禁删与级联
+  删除提示）；兑换码（批量生成 count 1..100/面额/有效期、keys 一次性弹窗逐条+整批复制、
+  状态列）；日志（用户/渠道下拉+模型名+时间区间筛选、detail JSON 美化展开）；模型广场
+  （/v1/models 转发面令牌 + 虚拟模型组展示 + 渠道聚合管理视角）；系统设置（options 白名单
+  键三组编辑、逐键 JSON/int/bool 校验、留空=保持现有值、保存后展示新配置版本号）；
+- M2-wave2 构建链：package.json 新增 `lint`（tsc --noEmit）脚本与 react-router-dom@6、
+  dayjs 依赖；vite 开发代理补 `/v1`（转发面）；`npm run lint`/`npm run build` 通过，产物经
+  go:embed 嵌入验证（/ 与 /console SPA 回退 200、assets 命中）。
 - M2-wave1 管理面 API：登录会话（`POST /api/user/login`/`logout`，golang.org/x/crypto/bcrypt 校验，
   HMAC-SHA256 签名 cookie HttpOnly+SameSite=Lax TTL 7d，`users.auth_version` 纳入中间件比对、
   改密递增即失效旧会话；root 引导幂等，口令经 HUI_API_ROOT_PASSWORD 注入或缺省 123456）；
@@ -62,6 +80,10 @@
 
 ### 文档
 
+- M2-wave2：docs/05 新增 5.5 前端控制台对接注记（会话与 401/鉴权双体系/PUT 整对象写的
+  前端义务/options 键白名单双侧同步）；docs/01 落地进度更新（web 控制台落地）；docs/02
+  前端手工构建命令补 lint；docs/10 ROADMAP wave2 完成与状态块重写、新增交接记录一条；
+  docs/11 踩坑追加一条（JSX 属性字符串转义）。
 - M2-wave1：docs/05 新增第五节管理面契约（通用约定/端点明细/错误码表/限流契约）；docs/01 目录结构与落地进度同步（internal/api、internal/ratelimit）；docs/10 ROADMAP 拆 M2 三波、状态块重写与新增交接记录五条；docs/11 踩坑追加三条；新增 ADR 0005（会话鉴权标准化与限流挂接解耦：bcrypt 用 x/crypto、HMAC cookie、手写滑动窗口、整对象幂等写）。
 - M1-wave3：docs/01 设计点 4 落地标注与目录结构同步；docs/04 落地标注 + 新增「公式实测」节（四条黄金样例数值对齐）；docs/05 错误码表补 403/503 计费语义与计费运行轨键；docs/10 ROADMAP 重排（M1 完成、M2 重定义管理面 API）与状态块重写；docs/11 踩坑追加；新增 ADR 0004（计费引擎落地：expr 选型与 tier 单层语义）。
 - M1-wave2：docs/01 设计点 2/3 落地标注与目录结构同步（internal/channel 落地为 internal/gateway）；docs/05 转发面契约细化（请求/响应示例与错误码表）；docs/11 踩坑追加两条；docs/10 状态块与交接记录更新。
