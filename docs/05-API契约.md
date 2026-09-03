@@ -28,6 +28,7 @@
 | `/api/user/topup` `/api/user/self` | 兑换码核销 / 当前用户信息（登录态即可，非 root） | ✅ M2-wave3 |
 | `/api/token/:id/assign` | 额度划转（用户余额 → 令牌余额，登录态即可） | ✅ M2-wave3 |
 | `/api/token/mine` | 名下令牌列表（登录态，所有权作用域，白名单字段） | ✅ M2 缺陷修复 |
+| `/api/user/stats` | 今日自服务统计（登录态，当前用户请求/消耗/tokens 与模型分布） | ✅ M2 收官 |
 | `/api/status` | 服务状态、版本、schema 版本（无鉴权） | ✅ M0 |
 
 ## 二、契约约定（总体）
@@ -48,6 +49,7 @@
 - [x] M2-wave3：用户自服务端点契约细化——topup/self/assign + hooks 运行轨键与事件投递
   （核销入口落地为 `POST /api/user/topup` 而非设计稿的 `/api/redemption/redeem`：核销是
   用户侧动作，归入用户自服务组）（2026-09-03）
+- [x] M2 收官：自服务统计端点 `/api/user/stats` 契约细化 + 看板按角色取数注记（2026-09-03）
 - [ ] M4：管理面 `Idempotency-Key` 头语义复核（当前以 PUT 整对象幂等写替代）
 
 ## 四、转发面契约（M1-wave2 落地，M1-wave3 补计费）
@@ -111,7 +113,7 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 
 ### 5.1 通用约定
 
-- **鉴权**：除 `/api/user/login`、`/api/user/logout`、`/api/status` 外全部要求 root 会话（签名 cookie，缺失/篡改/过期/禁用/auth_version 不匹配 → 401/403）；例外：用户自服务组（`/api/user/topup`、`/api/user/self`、`/api/token/:id/assign`、`/api/token/mine`）仅要求登录态（RequireAuth，普通用户可访）。
+- **鉴权**：除 `/api/user/login`、`/api/user/logout`、`/api/status` 外全部要求 root 会话（签名 cookie，缺失/篡改/过期/禁用/auth_version 不匹配 → 401/403）；例外：用户自服务组（`/api/user/topup`、`/api/user/self`、`/api/user/stats`、`/api/token/:id/assign`、`/api/token/mine`）仅要求登录态（RequireAuth，普通用户可访）。
 - **响应包裹**：成功 `{"success":true,"message":"","data":...}`，失败 `{"success":false,"message":"...","code":"语义码"}`；创建类返回 201，其余 200；连通测试结果语义不落库不影响熔断（HTTP 恒 200）。
 - **幂等写**：PUT 为整对象幂等替换——显式字段含零值全部生效，同 body 重复 PUT 响应体一致；缺省归一化：status 0→启用、token.expired_time 0→永久（`-1`）、group 空→`default`、user.role 0→普通用户；channel.key 空=保留旧值（唯一例外，防回显脱敏值覆盖明文）；token 的 key/key_hash/user_id 与 root 自身 role/status 不可经 PUT 修改。
 - **分页**：`?page=1&page_size=20`（page_size 上限 100），响应 `data.items/total/page/page_size`；列表排序：channel/option 按 id 升序或 key 字典序，token/redemption/log 按 id 降序。
@@ -132,6 +134,7 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 | `GET/PUT /api/option` | PUT `{"options":{k:v}}` | 键白名单：`relay.*`/`billing_setting.*`/`hooks.*` 前缀 + `ModelRatio`/`CompletionRatio`/`GroupRatio`/`ModelRequestRateLimitEnabled/DurationMinutes/Count/SuccessCount/Group` 精确键（拒 `schema_version`）；值长 ≤2048；任一非法整体拒绝；写后返回新 `version` 且配置热生效 |
 | `POST /api/user/topup` | `{key}`（登录态） | `{quota_added,user_quota}`；事务原子核销（条件 UPDATE 未用→已用防并发重复）→ 面额入账 → topup 日志；过期码惰性标记 status=4 并 400 `redemption_expired` |
 | `GET /api/user/self` | -（登录态） | 当前用户对象（同用户视图字段，password_hash 序列化豁免） |
+| `GET /api/user/stats` | -（登录态） | 当前用户今日统计 `{start_timestamp,end_timestamp,requests,prompt_tokens,completion_tokens,tokens,quota,models[]}`；服务端 SQL 聚合 logs，作用域恒为会话用户（user_id 查询参数被忽略）；models 按 quota 降序上限 100 行（`model_name/requests/prompt_tokens/completion_tokens/quota`）；时间口径=服务器本地今日 [0 点，当前]；无日志返回全零空态（200 非错误） |
 | `POST /api/token/:id/assign` | `{quota>0}`（登录态；归属者或管理员） | `{quota_assigned,remain_quota}`；用户余额 → 令牌 remain+quota 同步增加的转移事务；余额不足 400 `insufficient_quota`；unlimited 令牌 400 拒绝 |
 | `GET /api/token/mine` | -（登录态） | 当前用户名下令牌分页列表（形状同管理列表 items/total/page/page_size，id 降序）；所有权作用域强制取会话用户（user_id 查询参数被忽略）；响应为白名单字段——不含 key/key_hash（密钥材料）与 tpm_rpm/tags/allow_ips（管理配置字段） |
 
@@ -182,6 +185,11 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
   （最低权限端点；用管理端点探针会把普通用户 403「需要管理员权限」误判为会话失效，
   详见 docs/11 踩坑）；菜单按角色渲染——渠道/用户/兑换码/系统设置为 root 专属
   （ADMIN_ONLY_KEYS），普通用户见数据看板/令牌/充值/模型广场/日志，直访专属路径回看板。
+- **数据看板按角色取数（M2 收官 Task #19）**：/console 数据看板 root 用管理面 `GET /api/log`
+  今日区间分页聚合（上限 10 页 × 100 条，超出提示截断口径）；普通用户调登录态
+  `GET /api/user/stats`（服务端 SQL 聚合，一次请求返回汇总与模型分布，无截断）；两类
+  数据源加载失败均优雅降级空态（0 值卡片 + 空表 + console.warn 留痕），不显示错误横幅——
+  普通用户页面禁止直调管理面端点（/api/log 为 root 专属，直调 403）。
 
 ### 5.6 hooks 事件投递契约（M2-wave3）
 
