@@ -2,7 +2,8 @@
 //   1. 余额展示（GET /api/user/self，quota 与美元换算同 QUOTA_PER_DOLLAR）；
 //   2. 兑换码核销（POST /api/user/topup：事务原子核销 → 面值入账用户余额）；
 //   3. 额度划转（POST /api/token/:id/assign：user.quota → token.remain_quota）。
-// 控制台为管理面会话：划转下拉列出当前登录用户名下令牌（GET /api/token?user_id=）；
+// 名下令牌列表走所有权作用域端点 GET /api/token/mine（登录态即可；管理列表
+// /api/token 为 root 专属，普通用户会 403——M2 浏览器验收缺陷修复）。
 // 面向普通用户的独立门户属 M3 范畴。
 import { useCallback, useEffect, useState } from 'react'
 import {
@@ -40,8 +41,10 @@ export default function TopUpPage() {
     try {
       const u = await api.get<UserInfo>('/api/user/self')
       setSelf(u)
-      const d = await api.get<Paged<Token>>('/api/token', {
-        user_id: u.id,
+      // 名下令牌：所有权作用域端点（登录态；user_id 由服务端强制取会话用户）。
+      // 响应为白名单字段视图（无 tpm_rpm/tags/allow_ips 等管理字段），
+      // Token 类型中缺失字段不影响本页使用的 id/name/remain_quota。
+      const d = await api.get<Paged<Token>>('/api/token/mine', {
         page: 1,
         page_size: 100,
       })
