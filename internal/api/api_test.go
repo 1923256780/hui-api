@@ -152,8 +152,17 @@ func TestSessionRoundTrip(t *testing.T) {
 }
 
 // TestSessionTamperRejected 篡改 payload 或签名任意部分均拒绝。
+// 用确定不同的字符替换：固定 'A'/'B' 在原字符相同时（约 1/64 概率，随时间戳
+// 内容漂移偶发）篡改实际未变，会误报失败。
 func TestSessionTamperRejected(t *testing.T) {
 	sess := NewSessionManager([]byte("test-secret"))
+	flipChar := func(s string, i int) string {
+		next := byte('A')
+		if s[i] == 'A' {
+			next = 'B'
+		}
+		return s[:i] + string(next) + s[i+1:]
+	}
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -162,8 +171,8 @@ func TestSessionTamperRejected(t *testing.T) {
 	value := strings.TrimPrefix(raw, SessionCookieName+"=")
 
 	for name, mutated := range map[string]string{
-		"payload": value[:len(value)/2] + "A" + value[len(value)/2+1:], // 翻转中部一个字符
-		"sign":    value[:len(value)-1] + "B",
+		"payload": flipChar(value, len(value)/2), // 翻转中部一个字符
+		"sign":    flipChar(value, len(value)-1),
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Set("Cookie", SessionCookieName+"="+mutated)

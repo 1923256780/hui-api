@@ -70,6 +70,10 @@ func (h *Handler) Register(r gin.IRouter) {
 // registerManaged 挂载 root 权限的管理端点（各域文件分段注册）。
 func (h *Handler) registerManaged(g *gin.RouterGroup) {
 	h.registerChannelRoutes(g)
+	h.registerTokenRoutes(g)
+	h.registerUserRoutes(g)
+	h.registerRedemptionRoutes(g)
+	h.registerLogRoutes(g)
 	h.registerOptionRoutes(g)
 }
 
