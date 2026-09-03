@@ -1,14 +1,14 @@
 // Logs 请求日志：分页表格（时间/用户/渠道/模型/tokens/quota/耗时）、筛选
-//（用户/渠道下拉 + 模型名 + 时间区间）、明细展开（detail 计费依据 JSON 美化）。
-// channel_id 过滤待 hook 回填后生效（wave1 仅链路就绪）。
+//（用户/渠道下拉 + 模型下拉（AutoComplete：选项从当前页数据去重生成，
+// 支持手输精确模型名）+ 时间区间）、明细展开（detail 计费依据 JSON 美化）。
 import { useCallback, useEffect, useState } from 'react'
 import {
   App,
+  AutoComplete,
   Button,
   Card,
   DatePicker,
   Form,
-  Input,
   Select,
   Space,
   Table,
@@ -39,6 +39,9 @@ export default function LogsPage() {
   const [pageSize, setPageSize] = useState(20)
   const [users, setUsers] = useState<UserInfo[]>([])
   const [channels, setChannels] = useState<ChannelView[]>([])
+  // 模型筛选选项：从已加载的日志数据去重生成（/v1/models 为转发面 Bearer
+  // 鉴权端点，管理台会话不可用，故以日志数据为选项源）。
+  const [modelOptions, setModelOptions] = useState<string[]>([])
   const [form] = Form.useForm<FilterForm>()
 
   // filters 保存"已提交"的筛选条件（点查询才生效），与输入态分离。
@@ -70,6 +73,14 @@ export default function LogsPage() {
           end_timestamp: range?.[1] ? range[1].startOf('second').unix() : undefined,
         })
         setData(d)
+        // 当前页模型名去重并入筛选选项（排序保持下拉可检索）。
+        setModelOptions((prev) => {
+          const merged = new Set(prev)
+          for (const it of d.items) {
+            if (it.model_name) merged.add(it.model_name)
+          }
+          return Array.from(merged).sort()
+        })
       } catch (err) {
         if (err instanceof ApiError && err.status !== 401) {
           message.error(err.message)
@@ -164,7 +175,13 @@ export default function LogsPage() {
             />
           </Form.Item>
           <Form.Item name="model_name" label="模型">
-            <Input allowClear placeholder="精确模型名" style={{ width: 170 }} />
+            <AutoComplete
+              allowClear
+              options={modelOptions.map((m) => ({ value: m }))}
+              filterOption
+              placeholder="模型名（下拉选择或输入）"
+              style={{ width: 180 }}
+            />
           </Form.Item>
           <Form.Item name="range" label="时间">
             <DatePicker.RangePicker showTime />

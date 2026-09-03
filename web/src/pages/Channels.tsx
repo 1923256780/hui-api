@@ -167,7 +167,8 @@ export default function ChannelsPage() {
       if (r.success) {
         message.success(`测试通过：HTTP ${r.status_code}，耗时 ${r.time_ms}ms`)
       } else {
-        message.warning(`测试失败：${r.message || `HTTP ${r.status_code}`}`)
+        const code = r.status_code > 0 ? `HTTP ${r.status_code}` : '上游不可达'
+        message.warning(`测试失败：${r.message || code}`)
       }
     } catch (err) {
       if (err instanceof ApiError && err.status !== 401) {
@@ -213,17 +214,19 @@ export default function ChannelsPage() {
     {
       title: '最近测试',
       key: 'test',
-      width: 150,
+      width: 170,
       render: (_, record) => {
         const r = testResults[record.id]
         if (!r) return <Text type="secondary">未测试</Text>
-        return r.success ? (
-          <Tooltip title={`HTTP ${r.status_code}`}>
-            <Tag color="green">{r.time_ms}ms</Tag>
-          </Tooltip>
-        ) : (
-          <Tooltip title={r.message || `HTTP ${r.status_code}`}>
-            <Tag color="red">失败</Tag>
+        // 结构化展示后端返回的 status_code 与 time_ms；上游不可达（无状态码）
+        // 显示 —。完整错误信息经 Tooltip 呈现。
+        const code = r.status_code > 0 ? `HTTP ${r.status_code}` : '—'
+        const tip = r.message || (r.success ? `测试通过（${code}）` : `测试失败（${code}）`)
+        return (
+          <Tooltip title={tip}>
+            <Tag color={r.success ? 'green' : 'red'}>
+              {code} · {r.time_ms}ms
+            </Tag>
           </Tooltip>
         )
       },
