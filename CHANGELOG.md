@@ -9,6 +9,7 @@
 
 ### 新增
 
+- M4-wave2 生产旁路部署 + 切换 runbook（M4 第二波，docs/06 第七节、ADR-0009）：服务器旁路落机与生产旧网关并存（四不碰红线：不 restart/stop 生产服务、不写生产库、不动安全组/防火墙、不占 3000 端口）——交叉编译 linux/amd64 三产物（hui-api/migrate/logcheck，CGO_ENABLED=0，本地与服务器 MD5 双侧校验）部署至 /home/ubuntu/hui-api/{bin,config,data,logs}；config chmod 600（SESSION_SECRET 服务器端 openssl rand -hex 32 生成一次固化，不落仓库）；systemd 单元 hui-api.service（User=ubuntu、ExecStart 带 -config、MemoryMax=400M、GOMEMLIMIT=120MiB、Restart=on-failure）enable + start active；migrate 以服务器最新 cron 备份副本为只读源初始化旁路库（对账 18 项全 OK，与本地演练计数一致，报告落 logs/migrate-report.json）；冒烟 7/7 PASS（新增 scripts/deploy-smoke-server.sh 可复跑：HUI_BASE/HUI_ROOT/HUI_UNIT/HUI_SMOKE_MODEL 参数化，切换日 3000 接管后复用；含迁移令牌 /v1/models 200 key_hash 口径锚点与真实转发计费复核，quota=11 与演练一致）；生产网关全程 active 零重启；runbook（docs/06 第七节）：预检清单（对账全绿/备份在手/窗口选择/旁路健康/回滚认知）→ 快照 pre-hui-*.db → 停旧网关 → 最终迁移（重置目标库保对账语义）→ 改绑 3000 → 冒烟（HUI_BASE 复用）→ 观察 30min；回滚两条命令 RTO<30s（旧库全程零写入）；ADR-0009（旁路拓扑与双层内存限额、先 migrate 后 start 顺序决策）；
 - M4-wave1 旧库只读纪律 + 迁移工具 + 本地演练（M4 开篇，ADR-0008）：internal/store.OpenReadOnly
   （DSN mode=ro + PRAGMA query_only=1 双层只读防御，写失败测试证明且文件无污染）；
   internal/migrate 迁移引擎（transform 纯函数层 + 引擎层）与 cmd/migrate CLI
