@@ -1,5 +1,7 @@
-// Settings 系统设置：管理面可写键按分组编辑（计费/网关/限流），保存走
-// PUT /api/option（键白名单校验、任一非法整体拒绝），成功后展示新配置版本号。
+// Settings 系统设置：管理面可写键按分组编辑（计费/网关/限流/观测/注册/邮件/
+// 人机校验/OAuth/支付/邀请/充值），保存走 PUT /api/option（键白名单校验、
+// 任一非法整体拒绝），成功后展示新配置版本号。敏感键（password/secret）
+// 出口已脱敏为 ******，保存时原样回写后端视为「保持旧值」跳过不覆盖。
 // 注意：键白名单不含换皮类键（如 SystemName），后端未支持的键不在此提供，
 // 避免 option_forbidden 报错（docs/05 第五节）。
 import { useCallback, useEffect, useState } from 'react'
@@ -28,6 +30,8 @@ interface KeyDef {
   kind: ValueKind
   multiline?: boolean
   placeholder?: string
+  /** 敏感键（后端出口脱敏为 ******，回写哨兵保持旧值） */
+  sensitive?: boolean
 }
 
 interface GroupDef {
@@ -165,6 +169,248 @@ const KEY_GROUPS: GroupDef[] = [
       },
     ],
   },
+  {
+    title: '注册开关（register.*）',
+    description: 'M3-wave1 公开注册体系；关闭后 POST /api/user/register 返回 403 register_disabled。',
+    keys: [
+      {
+        key: 'register.enabled',
+        label: '开放注册开关',
+        kind: 'bool',
+        placeholder: 'true / false',
+      },
+      {
+        key: 'register.email_verification',
+        label: '邮箱验证码校验（需先配置 SMTP）',
+        kind: 'bool',
+        placeholder: 'true / false',
+      },
+      {
+        key: 'register.quota_for_new_user',
+        label: '新用户初始配额',
+        kind: 'int',
+        placeholder: '0',
+      },
+    ],
+  },
+  {
+    title: '邮件 SMTP（smtp.*）',
+    description: '验证码邮件发送通道（465 端口隐式 TLS）；关闭时发码端点返回 503 smtp_not_configured。',
+    keys: [
+      {
+        key: 'smtp.enabled',
+        label: 'SMTP 总开关',
+        kind: 'bool',
+        placeholder: 'true / false',
+      },
+      {
+        key: 'smtp.host',
+        label: 'SMTP 主机（TLS SNI 用域名）',
+        kind: 'text',
+        placeholder: 'smtp.example.com',
+      },
+      {
+        key: 'smtp.port',
+        label: '端口（当前仅支持 465 隐式 TLS）',
+        kind: 'int',
+        placeholder: '465',
+      },
+      {
+        key: 'smtp.username',
+        label: '认证用户名（兼缺省发件人）',
+        kind: 'text',
+        placeholder: 'no-reply@example.com',
+      },
+      {
+        key: 'smtp.password',
+        label: '认证密码',
+        kind: 'text',
+        sensitive: true,
+        placeholder: '已脱敏，回写 ****** 表示保持不变',
+      },
+      {
+        key: 'smtp.from',
+        label: '发件人地址（留空回退 username）',
+        kind: 'text',
+        placeholder: 'no-reply@example.com',
+      },
+    ],
+  },
+  {
+    title: '人机校验 Turnstile（turnstile.*）',
+    description: '开启后注册需通过 Cloudflare siteverify 服务端校验（5s 超时）；site_key 会随 /api/setup 下发给前端。',
+    keys: [
+      {
+        key: 'turnstile.enabled',
+        label: 'Turnstile 开关',
+        kind: 'bool',
+        placeholder: 'true / false',
+      },
+      {
+        key: 'turnstile.site_key',
+        label: '站点公钥（下发前端）',
+        kind: 'text',
+        placeholder: '0x4AAAAAAA...',
+      },
+      {
+        key: 'turnstile.secret_key',
+        label: '站点密钥（仅服务端）',
+        kind: 'text',
+        sensitive: true,
+        placeholder: '已脱敏，回写 ****** 表示保持不变',
+      },
+    ],
+  },
+  {
+    title: 'OAuth 登录（oauth.*）',
+    description: 'M3-wave2 对接；键位先行预留，配置不影响当前 /api/setup 的 oauth 可用性（恒 false）。',
+    keys: [
+      {
+        key: 'oauth.github_client_id',
+        label: 'GitHub Client ID',
+        kind: 'text',
+        placeholder: 'Iv1.xxxx',
+      },
+      {
+        key: 'oauth.github_client_secret',
+        label: 'GitHub Client Secret',
+        kind: 'text',
+        sensitive: true,
+        placeholder: '已脱敏，回写 ****** 表示保持不变',
+      },
+      {
+        key: 'oauth.linuxdo_client_id',
+        label: 'LINUX DO Client ID',
+        kind: 'text',
+        placeholder: 'xxxx',
+      },
+      {
+        key: 'oauth.linuxdo_client_secret',
+        label: 'LINUX DO Client Secret',
+        kind: 'text',
+        sensitive: true,
+        placeholder: '已脱敏，回写 ****** 表示保持不变',
+      },
+      {
+        key: 'oauth.oidc_issuer',
+        label: 'OIDC Issuer',
+        kind: 'text',
+        placeholder: 'https://idp.example.com',
+      },
+      {
+        key: 'oauth.oidc_client_id',
+        label: 'OIDC Client ID',
+        kind: 'text',
+        placeholder: 'xxxx',
+      },
+      {
+        key: 'oauth.oidc_client_secret',
+        label: 'OIDC Client Secret',
+        kind: 'text',
+        sensitive: true,
+        placeholder: '已脱敏，回写 ****** 表示保持不变',
+      },
+    ],
+  },
+  {
+    title: '支付 EPay（epay.*）',
+    description: '易支付网关参数（M3-wave2 对接，键位先行预留）。',
+    keys: [
+      {
+        key: 'epay.enabled',
+        label: 'EPay 开关',
+        kind: 'bool',
+        placeholder: 'true / false',
+      },
+      {
+        key: 'epay.gateway',
+        label: '网关提交地址',
+        kind: 'text',
+        placeholder: 'https://pay.example.com',
+      },
+      {
+        key: 'epay.partner_id',
+        label: '商户 ID',
+        kind: 'text',
+        placeholder: '1000',
+      },
+      {
+        key: 'epay.partner_key',
+        label: '商户密钥',
+        kind: 'text',
+        sensitive: true,
+        placeholder: '已脱敏，回写 ****** 表示保持不变',
+      },
+      {
+        key: 'epay.notify_url',
+        label: '异步通知地址',
+        kind: 'text',
+        placeholder: 'https://api.example.com/api/topup/epay/notify',
+      },
+    ],
+  },
+  {
+    title: '支付 Stripe（stripe.*）',
+    description: 'Stripe 网关参数（M3-wave2 对接，键位先行预留）。',
+    keys: [
+      {
+        key: 'stripe.enabled',
+        label: 'Stripe 开关',
+        kind: 'bool',
+        placeholder: 'true / false',
+      },
+      {
+        key: 'stripe.secret_key',
+        label: 'API Secret Key',
+        kind: 'text',
+        sensitive: true,
+        placeholder: '已脱敏，回写 ****** 表示保持不变',
+      },
+      {
+        key: 'stripe.webhook_secret',
+        label: 'Webhook 签名密钥',
+        kind: 'text',
+        sensitive: true,
+        placeholder: '已脱敏，回写 ****** 表示保持不变',
+      },
+    ],
+  },
+  {
+    title: '邀请奖励（aff.*）',
+    description: '注册时经邀请码绑定的双向奖励（quota 整数）；两条 protocol=aff 日志入账，邀请码无效不阻断注册。',
+    keys: [
+      {
+        key: 'aff.register_reward_inviter',
+        label: '邀请人奖励配额',
+        kind: 'int',
+        placeholder: '0',
+      },
+      {
+        key: 'aff.register_reward_invitee',
+        label: '被邀请人奖励配额',
+        kind: 'int',
+        placeholder: '0',
+      },
+    ],
+  },
+  {
+    title: '充值（topup.*）',
+    description: '在线充值参数（M3-wave2 对接，键位先行预留）；充值订单落 topup_orders 表。',
+    keys: [
+      {
+        key: 'topup.rate',
+        label: '兑换比率（每 1 货币单位兑换的 quota）',
+        kind: 'int',
+        placeholder: '500000',
+      },
+      {
+        key: 'topup.min_amount',
+        label: '单笔最低充值金额（货币单位）',
+        kind: 'int',
+        placeholder: '1',
+      },
+    ],
+  },
 ]
 
 function validateValue(def: KeyDef, value: string): string | null {
@@ -287,7 +533,7 @@ export default function SettingsPage() {
         showIcon
         style={{ marginBottom: 16 }}
         message={`配置版本：${version ?? '-'}${savedVersion !== null ? `（本次会话已保存至 v${savedVersion}）` : ''}`}
-        description="写后立即热生效，无需重启；键白名单之外（如换皮展示名）暂不支持在此编辑。留空的键保持现有值。"
+        description="写后立即热生效，无需重启；键白名单之外（如换皮展示名）暂不支持在此编辑。留空的键保持现有值；敏感键回写 ****** 表示保持不变。"
       />
       {KEY_GROUPS.map((group) => (
         <Card
@@ -309,6 +555,7 @@ export default function SettingsPage() {
                       {def.key}
                     </Text>{' '}
                     {changed && <Tag color="orange">未保存</Tag>}
+                    {def.sensitive && <Tag color="purple">已脱敏</Tag>}
                     {err && <Tag color="red">{err}</Tag>}
                   </div>
                   {renderInput(def)}
