@@ -3,7 +3,8 @@
 // M3-wave1 新增公开注册体系路由（register.go）与登录 IP 限频；M3-wave2 新增
 // 二段式登录（Login + /api/user/login/2fa）与 OAuth/TOTP/个人中心路由
 // （oauth.go/totp.go/profile.go）；M3-wave3 新增在线充值订单/支付回调/邀请
-// 信息路由（order.go/aff.go，docs/05 §5.10）。
+// 信息路由（order.go/aff.go，docs/05 §5.10）；M3-wave4 新增本人计费日志
+// （log.go 的 /api/log/mine）并把验证码清扫收编 worker 池。
 package api
 
 import (
@@ -74,11 +75,9 @@ func New(st *store.Store, rt *config.Runtime, gw *gateway.Gateway, sess *Session
 	}
 }
 
-// StartVerificationSweeper 启动验证码过期清扫后台任务（返回停止函数；
-// main 停机时调用释放资源）。
-func (h *Handler) StartVerificationSweeper(interval time.Duration) (stop func()) {
-	return h.vstore.StartSweeper(interval)
-}
+// VerificationStore 暴露验证码存储（M3-wave4：main 的 worker 池装配定时清扫，
+// Sweep 调用方见 internal/verification；替代原 StartVerificationSweeper）。
+func (h *Handler) VerificationStore() *verification.Store { return h.vstore }
 
 // resetChannel 写后使渠道相关运行态失效：复位该渠道熔断计数，新配置立即生效
 // （渠道调度无缓存，直接查库）。gw 为 nil 时跳过（最小构造/测试）。
@@ -145,6 +144,8 @@ func (h *Handler) Register(r gin.IRouter) {
 	g.POST("/token/:id/assign", h.RequireAuth, h.AssignTokenQuota)
 	// 名下令牌列表（M2 缺陷修复）：登录态 + 所有权作用域。
 	g.GET("/token/mine", h.RequireAuth, h.ListMyTokens)
+	// 本人计费日志（M3-wave4）：登录态 + 会话作用域 + 白名单字段。
+	g.GET("/log/mine", h.RequireAuth, h.ListMyLogs)
 	// 在线充值与邀请返利（M3-wave3，docs/05 §5.10）：下单/订单列表/邀请信息
 	// 登录态；支付网关回调（notify/return/webhook）公开，安全边界靠验签。
 	g.POST("/user/topup/order", h.RequireAuth, h.CreateTopupOrder)
