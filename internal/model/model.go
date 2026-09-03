@@ -1,4 +1,4 @@
-// Package model 定义 hui-api 的六张核心表模型。
+// Package model 定义 hui-api 的核心表模型。
 //
 // 设计来源：docs/03-数据模型与迁移.md。列名采用行业通用语义，quota 单位约定
 // 500000 quota = $1，所有落库金额均为 quota 整数。时间列统一为 unix 秒（int64）。
@@ -24,6 +24,14 @@ const (
 	RedemptionRedeemed = 2 // 已核销
 	RedemptionVoided   = 3 // 已作废
 	RedemptionExpired  = 4 // 已过期（核销时发现超期的惰性标记，M2-wave3）
+)
+
+// 充值订单状态（topup_orders.status，M3-wave1）。
+const (
+	TopupOrderPending = 1 // 待支付
+	TopupOrderPaid    = 2 // 已支付（入账完成）
+	TopupOrderFailed  = 3 // 支付失败
+	TopupOrderExpired = 4 // 超时未支付已过期
 )
 
 // EpochForever 表示“永不过期”的时间哨兵值（expired_time 语义）。
@@ -85,20 +93,26 @@ type Token struct {
 func (Token) TableName() string { return "tokens" }
 
 // User 用户与余额。用户余额（quota）独立于令牌预算，支持按用户维度审计。
+// M3-wave1 新增邀请（AffCode/InviterID/AffHistoryQuota）与两步验证（TOTP）列。
 type User struct {
-	ID            int64  `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
-	Username      string `gorm:"column:username;size:64;not null;uniqueIndex" json:"username"`
-	PasswordHash  string `gorm:"column:password_hash;size:128;not null;default:''" json:"-"`
-	DisplayName   string `gorm:"column:display_name;size:64;not null;default:''" json:"display_name"`
-	Role          int    `gorm:"column:role;not null;default:1" json:"role"`
-	Status        int    `gorm:"column:status;not null;default:1" json:"status"`
-	Quota         int64  `gorm:"column:quota;not null;default:0" json:"quota"`
-	UsedQuota     int64  `gorm:"column:used_quota;not null;default:0" json:"used_quota"`
-	Email         string `gorm:"column:email;size:128;not null;default:'';index" json:"email"`
-	Group         string `gorm:"column:group;size:64;not null;default:'default'" json:"group"` // 用户默认分组（管理面创建令牌的缺省归属组，M2-wave1）
-	AuthVersion   int64  `gorm:"column:auth_version;not null;default:0" json:"-"`              // 会话版本：递增使既有登录会话全部失效（改密时递增，M2-wave1）
-	CreatedTime   int64  `gorm:"column:created_time;not null;default:0" json:"created_time"`
-	LastLoginTime int64  `gorm:"column:last_login_time;not null;default:0" json:"last_login_time"`
+	ID              int64  `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
+	Username        string `gorm:"column:username;size:64;not null;uniqueIndex" json:"username"`
+	PasswordHash    string `gorm:"column:password_hash;size:128;not null;default:''" json:"-"`
+	DisplayName     string `gorm:"column:display_name;size:64;not null;default:''" json:"display_name"`
+	Role            int    `gorm:"column:role;not null;default:1" json:"role"`
+	Status          int    `gorm:"column:status;not null;default:1" json:"status"`
+	Quota           int64  `gorm:"column:quota;not null;default:0" json:"quota"`
+	UsedQuota       int64  `gorm:"column:used_quota;not null;default:0" json:"used_quota"`
+	Email           string `gorm:"column:email;size:128;not null;default:'';index" json:"email"`
+	Group           string `gorm:"column:group;size:64;not null;default:'default'" json:"group"`         // 用户默认分组（管理面创建令牌的缺省归属组，M2-wave1）
+	AuthVersion     int64  `gorm:"column:auth_version;not null;default:0" json:"-"`                      // 会话版本：递增使既有登录会话全部失效（改密时递增，M2-wave1）
+	AffCode         string `gorm:"column:aff_code;size:64;not null;default:'';index" json:"aff_code"`    // 本用户的邀请码（注册携带他人的 aff_code 建立邀请关系）
+	InviterID       int64  `gorm:"column:inviter_id;not null;default:0;index" json:"inviter_id"`         // 邀请人用户 ID（0 = 非邀请注册）
+	AffHistoryQuota int64  `gorm:"column:aff_history_quota;not null;default:0" json:"aff_history_quota"` // 邀请返利累计入账（quota）
+	TOTPSecret      string `gorm:"column:totp_secret;size:64;not null;default:''" json:"-"`              // TOTP 密钥（M3-wave1 仅建列，绑定流程 wave2 落地）
+	TOTPEnabled     bool   `gorm:"column:totp_enabled;not null;default:false" json:"totp_enabled"`       // 两步验证开关
+	CreatedTime     int64  `gorm:"column:created_time;not null;default:0" json:"created_time"`
+	LastLoginTime   int64  `gorm:"column:last_login_time;not null;default:0" json:"last_login_time"`
 }
 
 // TableName 显式指定表名。
@@ -151,7 +165,42 @@ type Log struct {
 // TableName 显式指定表名。
 func (Log) TableName() string { return "logs" }
 
-// AllModels 返回全部六表模型实例，供 AutoMigrate 与测试遍历使用。
+// UserIdentity 第三方身份绑定（M3-wave1）：一个用户可绑定多个外部身份提供者，
+// (provider, provider_uid) 复合唯一防同一外部身份重复绑定；OAuth 登录流程 M3-wave2 落地。
+type UserIdentity struct {
+	ID          int64  `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
+	UserID      int64  `gorm:"column:user_id;not null;default:0;index" json:"user_id"`
+	Provider    string `gorm:"column:provider;size:32;not null;default:'';uniqueIndex:idx_user_identities_provider_uid,priority:1" json:"provider"`
+	ProviderUID string `gorm:"column:provider_uid;size:128;not null;default:'';uniqueIndex:idx_user_identities_provider_uid,priority:2" json:"provider_uid"`
+	CreatedTime int64  `gorm:"column:created_time;not null;default:0" json:"created_time"`
+}
+
+// TableName 显式指定表名。
+func (UserIdentity) TableName() string { return "user_identities" }
+
+// TopupOrder 在线充值订单（M3-wave1）：支付网关下单后落库，回调验签后按 Status
+// 迁移入账；AmountCents 为支付金额（分），Quota 为应入账额度，Rate 记录下单时
+// 换算比（审计用）。订单状态见 TopupOrder* 枚举；支付网关对接 M3-wave2 落地。
+type TopupOrder struct {
+	ID          int64  `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
+	OrderNo     string `gorm:"column:order_no;size:64;not null;uniqueIndex" json:"order_no"`
+	UserID      int64  `gorm:"column:user_id;not null;default:0;index" json:"user_id"`
+	Gateway     string `gorm:"column:gateway;size:16;not null;default:''" json:"gateway"`
+	AmountCents int64  `gorm:"column:amount_cents;not null;default:0" json:"amount_cents"`
+	Currency    string `gorm:"column:currency;size:8;not null;default:'CNY'" json:"currency"`
+	Quota       int64  `gorm:"column:quota;not null;default:0" json:"quota"`
+	Rate        int64  `gorm:"column:rate;not null;default:0" json:"rate"`
+	Status      int    `gorm:"column:status;not null;default:1" json:"status"`
+	TradeNo     string `gorm:"column:trade_no;size:128;not null;default:'';index" json:"trade_no"`
+	Detail      string `gorm:"column:detail;size:1024;not null;default:''" json:"detail"`
+	PaidTime    int64  `gorm:"column:paid_time;not null;default:0" json:"paid_time"`
+	CreatedTime int64  `gorm:"column:created_time;not null;default:0" json:"created_time"`
+}
+
+// TableName 显式指定表名。
+func (TopupOrder) TableName() string { return "topup_orders" }
+
+// AllModels 返回全部表模型实例，供 AutoMigrate 与测试遍历使用。
 func AllModels() []any {
 	return []any{
 		&Channel{},
@@ -160,5 +209,7 @@ func AllModels() []any {
 		&Redemption{},
 		&Option{},
 		&Log{},
+		&UserIdentity{},
+		&TopupOrder{},
 	}
 }

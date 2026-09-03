@@ -229,6 +229,107 @@ func TestSixTablesCRUD(t *testing.T) {
 	}
 }
 
+// TestM3TablesCRUD M3-wave1 两张新表读写回环：user_identities 复合唯一约束、
+// topup_orders order_no 唯一约束与状态/金额字段回读（schema v4，迁移 0004）。
+func TestM3TablesCRUD(t *testing.T) {
+	st := openTestStore(t)
+	now := time.Now().Unix()
+
+	uid := &model.UserIdentity{
+		UserID: 7, Provider: "github", ProviderUID: "10001", CreatedTime: now,
+	}
+	if err := st.Write.Create(uid).Error; err != nil {
+		t.Fatalf("插入 user_identity 失败: %v", err)
+	}
+	var gotUID model.UserIdentity
+	if err := st.Read.Where("provider = ? AND provider_uid = ?", "github", "10001").
+		First(&gotUID).Error; err != nil {
+		t.Fatalf("按复合键读取 user_identity 失败: %v", err)
+	}
+	if gotUID.UserID != 7 {
+		t.Fatalf("user_identity 回读不一致: %+v", gotUID)
+	}
+	dupUID := &model.UserIdentity{UserID: 8, Provider: "github", ProviderUID: "10001", CreatedTime: now}
+	if err := st.Write.Create(dupUID).Error; err == nil {
+		t.Fatal("(provider,provider_uid) 复合唯一未生效：重复插入应报错")
+	}
+	otherProvider := &model.UserIdentity{UserID: 7, Provider: "linuxdo", ProviderUID: "10001", CreatedTime: now}
+	if err := st.Write.Create(otherProvider).Error; err != nil {
+		t.Fatalf("同 UID 不同 provider 应可共存: %v", err)
+	}
+
+	order := &model.TopupOrder{
+		OrderNo: "T20260903ABCD0001", UserID: 7, Gateway: "epay",
+		AmountCents: 1000, Currency: "CNY", Quota: 500000, Rate: 500000,
+		Status: model.TopupOrderPending, TradeNo: "202609031200001",
+		Detail: `{"ip":"127.0.0.1"}`, CreatedTime: now,
+	}
+	if err := st.Write.Create(order).Error; err != nil {
+		t.Fatalf("插入 topup_order 失败: %v", err)
+	}
+	var gotOrder model.TopupOrder
+	if err := st.Read.Where("order_no = ?", order.OrderNo).First(&gotOrder).Error; err != nil {
+		t.Fatalf("按 order_no 读取失败: %v", err)
+	}
+	if gotOrder.Status != model.TopupOrderPending || gotOrder.AmountCents != 1000 || gotOrder.Currency != "CNY" {
+		t.Fatalf("topup_order 回读不一致: %+v", gotOrder)
+	}
+	dupOrder := &model.TopupOrder{OrderNo: order.OrderNo, UserID: 7, CreatedTime: now}
+	if err := st.Write.Create(dupOrder).Error; err == nil {
+		t.Fatal("order_no 唯一索引未生效：重复插入应报错")
+	}
+
+	// 状态迁移语义：pending → paid（条件 UPDATE 恰一次，供 M3-wave2 回调复用）。
+	res := st.Write.Model(&model.TopupOrder{}).
+		Where("id = ? AND status = ?", order.ID, model.TopupOrderPending).
+		Updates(map[string]any{"status": model.TopupOrderPaid, "paid_time": now})
+	if res.Error != nil {
+		t.Fatalf("订单状态迁移失败: %v", res.Error)
+	}
+	if res.RowsAffected != 1 {
+		t.Fatalf("pending → paid 应影响 1 行，实际 %d", res.RowsAffected)
+	}
+	res = st.Write.Model(&model.TopupOrder{}).
+		Where("id = ? AND status = ?", order.ID, model.TopupOrderPending).
+		Update("status", model.TopupOrderPaid)
+	if res.Error != nil || res.RowsAffected != 0 {
+		t.Fatalf("重复迁移应命中 0 行（防重复入账），实际 %d err=%v", res.RowsAffected, res.Error)
+	}
+}
+
+// TestUserAffColumns M3-wave1 users 新列（邀请/TOTP）默认值与回读。
+func TestUserAffColumns(t *testing.T) {
+	st := openTestStore(t)
+	now := time.Now().Unix()
+	u := &model.User{Username: "affuser", CreatedTime: now}
+	if err := st.Write.Create(u).Error; err != nil {
+		t.Fatalf("插入 user 失败: %v", err)
+	}
+	var got model.User
+	if err := st.Read.First(&got, u.ID).Error; err != nil {
+		t.Fatalf("读取 user 失败: %v", err)
+	}
+	if got.AffCode != "" || got.InviterID != 0 || got.AffHistoryQuota != 0 {
+		t.Fatalf("邀请列默认值应为零值: %+v", got)
+	}
+	if got.TOTPSecret != "" || got.TOTPEnabled {
+		t.Fatalf("TOTP 列默认值应为关闭: %+v", got)
+	}
+	got.AffCode = "INV01A2B"
+	got.InviterID = 42
+	got.AffHistoryQuota = 12345
+	if err := st.Write.Save(&got).Error; err != nil {
+		t.Fatalf("更新邀请列失败: %v", err)
+	}
+	var re model.User
+	if err := st.Read.First(&re, u.ID).Error; err != nil {
+		t.Fatalf("回读 user 失败: %v", err)
+	}
+	if re.AffCode != "INV01A2B" || re.InviterID != 42 || re.AffHistoryQuota != 12345 {
+		t.Fatalf("邀请列回读不一致: %+v", re)
+	}
+}
+
 // TestDDLEquivalence 双源一致性：migrations/*.sql 按文件名顺序执行建出的表，
 // 与 AutoMigrate 建出的表列集合一致（0001 基线 + 后续 up-only 迁移叠加）。
 func TestDDLEquivalence(t *testing.T) {
@@ -278,8 +379,11 @@ func TestDDLEquivalence(t *testing.T) {
 		}
 	}
 
-	// 对比六表列名集合。
-	tables := []string{"channels", "tokens", "users", "redemptions", "options", "logs"}
+	// 对比全部表列名集合（含 M3-wave1 新增 user_identities/topup_orders）。
+	tables := []string{
+		"channels", "tokens", "users", "redemptions", "options", "logs",
+		"user_identities", "topup_orders",
+	}
 	for _, table := range tables {
 		autoCols, err := tableColumns(autoSt.Read, table)
 		if err != nil {

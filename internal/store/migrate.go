@@ -19,8 +19,11 @@ import (
 //	1（M1-wave1）六表基线；
 //	2（M1-wave2）channels 新增 param_override 列（0002_channel_param_override.sql）；
 //	3（M2-wave1）tokens 新增 group/model_limits/allow_ips，users 新增 group/auth_version
-//	  （0003_m2_token_user_columns.sql）。
-const SchemaVersion int64 = 3
+//	  （0003_m2_token_user_columns.sql）；
+//	4（M3-wave1）users 新增 aff_code/inviter_id/aff_history_quota/totp_secret/totp_enabled，
+//	  新增 user_identities（第三方身份绑定，(provider,provider_uid) 复合唯一）与
+//	  topup_orders（在线充值订单，order_no 唯一）两表（0004_m3_commercial.sql）。
+const SchemaVersion int64 = 4
 
 // OptionKeySchemaVersion 是 options 表中记录 schema 版本的键。
 const OptionKeySchemaVersion = "schema_version"
@@ -29,7 +32,7 @@ const OptionKeySchemaVersion = "schema_version"
 //
 // 规则（docs/03 第四节）：
 //  1. 基线（版本 1）：AutoMigrate 以 internal/model 为源创建六表；
-//  2. 迁移幂等：重复启动重复执行不产生副作用；AutoMigrate 对后续版本的新列
+//  2. 迁移幂等：重复启动重复执行不产生副作用；AutoMigrate 对后续版本的新列/新表
 //     同样自动补齐（与 migrations/*.sql 文档源保持等价，由 TestDDLEquivalence 对账）；
 //  3. 成功后把 schema_version 写入 options 表；
 //  4. 禁止修改历史迁移：本波之后的新变更走新版本号迁移，不回改基线。
