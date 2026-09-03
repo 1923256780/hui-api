@@ -9,6 +9,24 @@
 
 ### 新增
 
+- M3-wave1 schema v4 与公开注册体系（Task #19）：schema v4（迁移
+  0004_m3_commercial + TestDDLEquivalence 双源对账八表）——users 加邀请/两步验证 5 列
+  （aff_code/inviter_id/aff_history_quota/totp_secret（json:"-" 豁免序列化）/
+  totp_enabled），新增 user_identities（复合唯一 provider+provider_uid）与
+  topup_orders（订单号唯一索引、状态机 1=待支付 2=已支付 3=失败 4=过期）两表；
+  options 白名单扩 8 前缀（smtp./register./oauth./turnstile./epay./stripe./aff./
+  topup.）+ 敏感键读取脱敏（键含 password/secret 恒回 `******`，库内明文不变）+
+  PUT 哨兵跳过（回写 `******` = 保持旧值）；internal/mailer（465 隐式 TLS + AUTH
+  LOGIN 手工实现，配置闭包热读取）与 internal/verification（验证码内存存储：TTL
+  10min/重发 60s/日限 20/一次性消费/惰性 + 定时清扫）；公开注册四端点 GET /api/setup、
+  POST /api/user/register（开关 + IP 限频 + Turnstile + 验证码 + 查重 + bcrypt +
+  事务建户 + aff 双向奖励恰一入账）、POST /api/verification_code（SMTP 门控 + 限频）、
+  POST /api/user/reset_password（验码一次性消费 + auth_version++ 会话失效）；Login/
+  reset IP 限频（1h×10/1h×5，响应带 Retry-After）；Turnstile siteverify 接口化客户端
+  （5s 超时，可 mock）；/api/status features 特性开关块；前端 Settings 同步 8 分组
+  （敏感键「已脱敏」标注）；测试矩阵（迁移/白名单脱敏哨兵/验证码 TTL 限频一次性/
+  注册矩阵含 aff 并发恰一/Turnstile mock/自签 TLS 假 SMTP/IP 限频）+ gateway
+  Windows 时钟粒度修复，`go test ./... -race` 全绿；
 - M2 收官统计缺陷修复（Task #19）：`GET /api/user/stats` 自服务统计端点（登录态，服务端
   SQL 聚合当前用户今日 logs——请求/消耗/tokens 汇总 + 模型分布按 quota 降序上限 100 行，
   user_id 查询参数被忽略恒会话用户作用域，无日志返回全零空态，附作用域/越权/泄漏/

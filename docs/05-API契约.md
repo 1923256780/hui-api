@@ -1,6 +1,6 @@
 # 05-API契约
 
-> 状态：**活文档**。转发面契约已于 M1-wave2 落地并细化（见第四节）；管理面契约已于 M2-wave1 落地并细化（见第五节，登录会话 + 六组端点）；后续波次增量更新。
+> 状态：**活文档**。转发面契约已于 M1-wave2 落地并细化（见第四节）；管理面契约已于 M2-wave1 落地并细化（见第五节，登录会话 + 六组端点）；公开注册体系契约已于 M3-wave1 落地并细化（见 5.7）；后续波次增量更新。
 
 ## 一、端点清单（规划）
 
@@ -29,7 +29,11 @@
 | `/api/token/:id/assign` | 额度划转（用户余额 → 令牌余额，登录态即可） | ✅ M2-wave3 |
 | `/api/token/mine` | 名下令牌列表（登录态，所有权作用域，白名单字段） | ✅ M2 缺陷修复 |
 | `/api/user/stats` | 今日自服务统计（登录态，当前用户请求/消耗/tokens 与模型分布） | ✅ M2 收官 |
-| `/api/status` | 服务状态、版本、schema 版本（无鉴权） | ✅ M0 |
+| `GET /api/setup` | 注册能力发现（公开）：注册/邮箱验证开关、Turnstile site key、OAuth 可用性 | ✅ M3-wave1 |
+| `POST /api/user/register` | 用户注册（公开，开关 + IP 限频 + 人机校验 + 邮箱验证码 + aff 邀请奖励） | ✅ M3-wave1 |
+| `POST /api/verification_code` | 发送邮箱验证码（公开，SMTP 就绪性门控 + 重发限频） | ✅ M3-wave1 |
+| `POST /api/user/reset_password` | 邮箱验证码重置密码（公开，验码 + bcrypt + auth_version++） | ✅ M3-wave1 |
+| `/api/status` | 服务状态、版本、schema 版本、features 特性开关块（无鉴权） | ✅ M0（features M3-wave1） |
 
 ## 二、契约约定（总体）
 
@@ -50,6 +54,8 @@
   （核销入口落地为 `POST /api/user/topup` 而非设计稿的 `/api/redemption/redeem`：核销是
   用户侧动作，归入用户自服务组）（2026-09-03）
 - [x] M2 收官：自服务统计端点 `/api/user/stats` 契约细化 + 看板按角色取数注记（2026-09-03）
+- [x] M3-wave1：公开注册体系契约细化——setup/register/verification_code/reset_password
+  四端点 + /api/status features 块 + options 商业化前缀与脱敏哨兵（2026-09-03）
 - [ ] M4：管理面 `Idempotency-Key` 头语义复核（当前以 PUT 整对象幂等写替代）
 
 ## 四、转发面契约（M1-wave2 落地，M1-wave3 补计费）
@@ -113,7 +119,7 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 
 ### 5.1 通用约定
 
-- **鉴权**：除 `/api/user/login`、`/api/user/logout`、`/api/status` 外全部要求 root 会话（签名 cookie，缺失/篡改/过期/禁用/auth_version 不匹配 → 401/403）；例外：用户自服务组（`/api/user/topup`、`/api/user/self`、`/api/user/stats`、`/api/token/:id/assign`、`/api/token/mine`）仅要求登录态（RequireAuth，普通用户可访）。
+- **鉴权**：除 `/api/user/login`、`/api/user/logout`、`/api/status` 外全部要求 root 会话（签名 cookie，缺失/篡改/过期/禁用/auth_version 不匹配 → 401/403）；例外：用户自服务组（`/api/user/topup`、`/api/user/self`、`/api/user/stats`、`/api/token/:id/assign`、`/api/token/mine`）仅要求登录态（RequireAuth，普通用户可访）；公开注册组（`/api/setup`、`/api/user/register`、`/api/verification_code`、`/api/user/reset_password`，M3-wave1）无会话要求，安全边界由开关门控 + IP 限频 + 人机校验/验证码承担（见 5.7）。
 - **响应包裹**：成功 `{"success":true,"message":"","data":...}`，失败 `{"success":false,"message":"...","code":"语义码"}`；创建类返回 201，其余 200；连通测试结果语义不落库不影响熔断（HTTP 恒 200）。
 - **幂等写**：PUT 为整对象幂等替换——显式字段含零值全部生效，同 body 重复 PUT 响应体一致；缺省归一化：status 0→启用、token.expired_time 0→永久（`-1`）、group 空→`default`、user.role 0→普通用户；channel.key 空=保留旧值（唯一例外，防回显脱敏值覆盖明文）；token 的 key/key_hash/user_id 与 root 自身 role/status 不可经 PUT 修改。
 - **分页**：`?page=1&page_size=20`（page_size 上限 100），响应 `data.items/total/page/page_size`；列表排序：channel/option 按 id 升序或 key 字典序，token/redemption/log 按 id 降序。
@@ -131,7 +137,7 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 | `GET/POST/PUT/DELETE /api/token` | user_id 必填且存在；quota/remain/unlimited/budget_duration/tpm_rpm/tags/group/model_limits/allow_ips/expired_time | 创建响应 `data.key` 为明文（`sk-`+32hex）**仅此一次**；remain 缺省=quota；group 缺省取用户分组再退 default；写后鉴权缓存失效 |
 | `GET/POST/DELETE /api/redemption` | 批量生成 `{count:1..100,name,quota>0,expired_time}` | `data.keys` 明文数组（`redd-`+24hex）仅此一次；key 冲突自动重试，重试穷尽整批拒绝 |
 | `GET /api/log` | 过滤：`user_id/token_id/channel_id/model_name/start_timestamp/end_timestamp`（Unix 秒闭区间） | id 降序；channel_id 已生效（M2-wave3 日志回填实际服务渠道） |
-| `GET/PUT /api/option` | PUT `{"options":{k:v}}` | 键白名单：`relay.*`/`billing_setting.*`/`hooks.*` 前缀 + `ModelRatio`/`CompletionRatio`/`GroupRatio`/`ModelRequestRateLimitEnabled/DurationMinutes/Count/SuccessCount/Group` 精确键（拒 `schema_version`）；值长 ≤2048；任一非法整体拒绝；写后返回新 `version` 且配置热生效 |
+| `GET/PUT /api/option` | PUT `{"options":{k:v}}` | 键白名单：`relay.*`/`billing_setting.*`/`hooks.*`/`smtp.*`/`register.*`/`oauth.*`/`turnstile.*`/`epay.*`/`stripe.*`/`aff.*`/`topup.*` 前缀 + `ModelRatio`/`CompletionRatio`/`GroupRatio`/`ModelRequestRateLimitEnabled/DurationMinutes/Count/SuccessCount/Group` 精确键（拒 `schema_version`）；值长 ≤2048；任一非法整体拒绝；写后返回新 `version` 且配置热生效；GET 响应中键名含 password/secret（不区分大小写）的值恒脱敏为 `******`（库内明文不变）；PUT 收到值 `******` 视为哨兵「保持旧值」跳过不覆盖（脱敏回显幂等；哨兵键仍须过白名单与长度校验） |
 | `POST /api/user/topup` | `{key}`（登录态） | `{quota_added,user_quota}`；事务原子核销（条件 UPDATE 未用→已用防并发重复）→ 面额入账 → topup 日志；过期码惰性标记 status=4 并 400 `redemption_expired` |
 | `GET /api/user/self` | -（登录态） | 当前用户对象（同用户视图字段，password_hash 序列化豁免） |
 | `GET /api/user/stats` | -（登录态） | 当前用户今日统计 `{start_timestamp,end_timestamp,requests,prompt_tokens,completion_tokens,tokens,quota,models[]}`；服务端 SQL 聚合 logs，作用域恒为会话用户（user_id 查询参数被忽略）；models 按 quota 降序上限 100 行（`model_name/requests/prompt_tokens/completion_tokens/quota`）；时间口径=服务器本地今日 [0 点，当前]；无日志返回全零空态（200 非错误） |
@@ -152,7 +158,14 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
 | 409 | `redemption_used` | 兑换码已被使用（含并发竞争失败） |
 | 400 | `redemption_expired` / `redemption_voided` | 兑换码已过期 / 已作废 |
 | 400 | `insufficient_quota` | 划转时用户余额不足（管理面语义，与转发面 403 区分归因） |
-| 429 | `rate_limited`（转发面） | 限流触发，响应带 `Retry-After`（见 4.1/限流语义） |
+| 403 | `register_disabled` | 注册开关关闭（`register.enabled` 非 true，M3-wave1） |
+| 400 | `turnstile_failed` | Turnstile 人机校验未通过（含 siteverify 调用失败，M3-wave1） |
+| 400 | `code_invalid_or_expired` / `code_mismatch` | 邮箱验证码不存在/已过期 / 验证码不匹配（不匹配不消费正确码，M3-wave1） |
+| 409 | `email_conflict` | 注册邮箱已被占用（M3-wave1；username 冲突见 `username_conflict`） |
+| 404 | `not_found` | 重置密码时邮箱未绑定任何账号（码已消费；不区分账号存在性防枚举，M3-wave1） |
+| 503 | `smtp_not_configured` | `smtp.enabled` 未开启时请求发送验证码（M3-wave1） |
+| 500 | `mail_send_failed` | SMTP 发信失败（错误信息不含服务端内部细节，M3-wave1） |
+| 429 | `rate_limited`（转发面） | 限流触发，响应带 `Retry-After`（见 4.1/限流语义；公开组 IP 限频见 5.7） |
 | 500 | `*_failed` | 存储层写失败（create/update/delete/query_failed） |
 
 ### 5.4 限流契约（M2-wave1，转发面）
@@ -173,9 +186,14 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
   误重置；用户编辑自己时 role/status 不渲染表单项，payload 必须原值回传，否则 self_lockout
   检查拦截任何编辑（含改邮箱）。
 - **options 键白名单双侧同步**：系统设置页可编辑键集合与 `internal/api/option.go`
-  allowedOptionKey 对齐（`relay.*`/`billing_setting.*`/`hooks.*` 前缀 + ModelRatio/CompletionRatio/
-  GroupRatio/ModelRequestRateLimit* 五精确键）；新增可写键必须前后端同步，否则保存即 400
-  `option_forbidden`；换皮类键（SystemName 等）后端不支持，前端不提供编辑。
+  allowedOptionKey 对齐（`relay.*`/`billing_setting.*`/`hooks.*` + M3-wave1 商业化前缀
+  `smtp.*`/`register.*`/`oauth.*`/`turnstile.*`/`epay.*`/`stripe.*`/`aff.*`/`topup.*`
+  + ModelRatio/CompletionRatio/GroupRatio/ModelRequestRateLimit* 五精确键）；新增可写键
+  必须前后端同步，否则保存即 400 `option_forbidden`；换皮类键（SystemName 等）后端不支持，
+  前端不提供编辑。**敏感键脱敏与哨兵（M3-wave1）**：键名含 password/secret（不区分
+  大小写）的键 GET 回显恒为 `******`，前端 Settings 对这类键标注「已脱敏」并提示回写
+  `******` = 保持旧值（PUT 哨兵跳过语义）；Settings KEY_GROUPS 已同步八个新分组
+  （注册/邮件 SMTP/Turnstile/OAuth/支付 EPay/Stripe/邀请 aff/充值 topup）。
 - **充值页（M2-wave3，M2 缺陷修复更新）**：/console/topup 调 `GET /api/user/self` +
   `GET /api/token/mine`（所有权作用域端点，登录态即可；原对接的管理列表
   `GET /api/token?user_id=` 为 root 专属，普通用户 403）+ `POST /api/user/topup` +
@@ -207,3 +225,48 @@ count_tokens：恒为非流式，整体透传；`input_tokens` 即输入侧用�
   批量导出，失败丢弃计数，停机冲刷；int64 字段按 protobuf JSON 规范以字符串编码。
 - **信任边界**：两 hook 均产生出站请求，目标地址由管理员配置——可达性与安全边界由配置方
   负责（本机 collector/webhook 接收端属正常用法）。
+
+### 5.7 公开注册体系契约（M3-wave1）
+
+公开组四端点（无会话要求），安全边界 = 开关门控 + IP 限频 + 人机校验/邮箱验证码。
+配置键见 5.5 键表（`register.*`/`smtp.*`/`turnstile.*` 前缀）；OAuth 三项在 M3-wave2
+落地前恒报 false；Turnstile/支付网关为行业通用服务，可达性由配置方自担。
+
+- **GET /api/setup**（公开）：返回 FeatureFlags——
+  `{register_enabled, email_verification, turnstile_site_key, oauth:{github,linuxdo,oidc}}`；
+  `turnstile_site_key` 仅在 `turnstile.enabled=true` 时非空（site_key 为公开公钥，
+  明文下发前端渲染 widget 用；secret_key 永不下发且经 options GET 脱敏）。
+  `/api/status` 的 `data.features` 块复用同一 FeatureFlags 结构（M3-wave1 起）。
+- **POST /api/user/register**（公开）：`{username, password, email, code?, aff_code?,
+  turnstile_token?}` → 201 `{id, username, aff_code}`（aff_code 为新用户 8 位随机邀请码，
+  去易混淆字符集）。流程与拒绝点：register.enabled 关 → 403 `register_disabled`；
+  IP 限频（1h×5，超限 429+Retry-After）；参数校验（三必填、email 含 @、password ≥6 位）
+  → 400 `invalid_request`；Turnstile 开 → 服务端 siteverify（5s 超时）失败 → 400
+  `turnstile_failed`；邮箱验证开 → 码校验（见下）失败 → 400；username/email 查重 → 409
+  `username_conflict`/`email_conflict`；bcrypt 建户（role=普通用户、group=default、
+  auth_version=1、quota=`register.quota_for_new_user`）。
+  **邀请奖励**：aff_code 查到邀请人 → 同一事务内双向入账（邀请人 quota 与
+  aff_history_quota 累加 `aff.register_reward_inviter`；新用户 quota 累加
+  `aff.register_reward_invitee`）+ 两条 protocol="aff" 日志（model_name=
+  `register_reward_inviter`/`register_reward_invitee`，detail 含 event/ref_id/quota）；
+  奖励值 ≤0 不入账；aff_code 无效/自引用不阻断注册（仅无奖励）。
+- **POST /api/verification_code**（公开）：`{email, purpose∈{register,reset}}` →
+  `{sent:true}`；purpose 白名单外 400；`smtp.enabled` 关 → 503 `smtp_not_configured`；
+  发信失败 → 500 `mail_send_failed`。验证码 6 位数字，TTL 10 分钟、同邮箱重发间隔
+  60 秒、每日上限 20 封（均 429 `rate_limited`）；一次性消费——成功校验即失效，
+  不匹配不消费正确码（可重试至过期）。码不回显、不落日志。
+- **POST /api/user/reset_password**（公开）：`{email, code, new_password}` →
+  `{reset:true}`；IP 限频（1h×5）；验码（一次性消费，purpose=reset）→ 查邮箱
+  （未绑定 404 `not_found`，此时码已消费——枚举探测需先获取有效码，泄露面可控）→
+  bcrypt 新口令 → auth_version++（既有会话全部失效）；new_password ≥6 位。
+- **IP 限频参数表**（复用 internal/ratelimit 滑动窗口，与管理面/转发面限流器隔离；
+  被拒请求无副作用、响应带 Retry-After 秒数）：
+
+  | 限频键 | 窗口 | 上限 |
+  | --- | --- | --- |
+  | `register\|<IP>` | 1h | 5 |
+  | `login\|<IP>` | 1h | 10 |
+  | `reset\|<IP>` | 1h | 5 |
+
+  Login 的 IP 限频先于凭据校验（含账号不存在场景）；发码限频由 verification.Store
+  按（邮箱+purpose）维度承担（60s/20 每日），与上表 IP 维度正交。
