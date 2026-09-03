@@ -9,6 +9,20 @@
 
 ### 新增
 
+- M4-wave1 旧库只读纪律 + 迁移工具 + 本地演练（M4 开篇，ADR-0008）：internal/store.OpenReadOnly
+  （DSN mode=ro + PRAGMA query_only=1 双层只读防御，写失败测试证明且文件无污染）；
+  internal/migrate 迁移引擎（transform 纯函数层 + 引擎层）与 cmd/migrate CLI
+  （`migrate -legacy <旧库> -target <hui库> [-report out.json] [-export-tokens tokens.tsv]`）：
+  六表迁移自然键 upsert 幂等可重跑（清库重跑 N 遍报告逐字节一致）；变换硬失败制
+  （bcrypt $2a$ 守卫/未知渠道类型与状态/非 envelope param_override 拒绝该行入报告）;
+  key_hash 复用 gateway.HashKey 防口径漂移；param_override envelope+operations→扁平 ops
+  （override.Parse 可消费）；空 base_url 按类型补官方端点；ModelRatio 按启用渠道模型
+  最小集 ×2 换算（黄金锚定旧库真实账单 85/766/14 三例固化，÷2 反证否决）；options
+  白名单 4 键逐字迁 + 其余入未迁清单；logs 仅 type=2 全量迁 + type=1 合成 topup 对账
+  （面值从 content 正则关联旧兑换码）；QuotaPerUnit≠500000 守卫拒跑；内置对账 13 项
+  指标 + options 逐键不等 exit 1；报告 JSON 完全确定性；scripts/migrate-drill.ps1
+  本地演练编排（解压备份→空库迁移→3200 端口隔离冒烟→清库重跑 2 遍→两遍报告 diff
+  确定性，真实转发上游不可达时如实降级计费引擎层复核）；docs/03 第七节迁移工具章节；
 - M3-wave4 worker + bundle 优化 + 个人日志视角（M3 收官）：internal/worker 极简 ticker 池
   （手写零新依赖：Task{Name,Interval,Run} 统一 Start/Stop、goroutine 内 time.Ticker、
   panic recover 不带崩进程、Stop 幂等）挂载 main 启动链路——验证码清扫（1min 调
