@@ -124,6 +124,11 @@ func (g *Gateway) Serve(c *gin.Context, proto relay.Protocol) {
 		return
 	}
 
+	// ---- 1.6 令牌预算周期惰性重置（M2-wave3）：窗口过期则滚动边界并复原
+	// remain_quota（CAS 保证并发下恰一次），再进入限流与计费预扣；无周期/
+	// unlimited 令牌零成本透传。
+	tok = g.rollBudget(tok)
+
 	// ---- 2. pre-call：请求体大小限制（本地快速失败，不触上游）。
 	raw, err := io.ReadAll(io.LimitReader(c.Request.Body, g.maxBodyBytes()+1))
 	if err != nil {
