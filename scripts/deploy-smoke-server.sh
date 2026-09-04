@@ -3,7 +3,7 @@
 #
 # 用法（服务器上，ubuntu 用户）：
 #   ./deploy-smoke-server.sh <tokens.tsv> [expect_schema]
-#   HUI_BASE=http://127.0.0.1:3000 可覆盖目标（旁路 3100 缺省；3000 接管后切换冒烟复用）
+#   HUI_BASE 可覆盖目标（缺省旁路 3100；启用 3100 为生产的切换日复用同一脚本）
 #   tokens.tsv      migrate -export-tokens 产物（TSV 表头 id/user_id/key，含令牌明文，
 #                   敏感文件——脚本退出（含中断）时自动删除（L5 评审），不留明文落盘）
 #   expect_schema   期望 schema 版本（缺省 4；schema 演进时由 runbook 传入新值）
